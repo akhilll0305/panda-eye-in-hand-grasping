@@ -12,6 +12,9 @@ VISUALIZE = False
 # detection images from identify_objects are saved in this folder
 OUTPUT_FOLDER = "./outputs"
 
+# Inside each class the functions are written in the order they are used in main.py.
+# "STEP x.y" in a docstring is the step number from main.py.
+
 
 class ObjectDetector:
     def __init__(self,):
@@ -58,7 +61,7 @@ class Perception:
 
     def generate_exploration_poses(self,):
         '''
-        returns list of 7D joint poses to explore the scene
+        STEP 1.1 - returns list of 7D joint poses to explore the scene
         '''
         # Idea: start from home pose and only rotate the base joint (yaw)
         # from -90 deg to +90 deg (180 deg sweep) so camera looks at all sides of table.
@@ -78,102 +81,9 @@ class Perception:
         print(f"Generated {len(poses)} exploration poses")
         return poses
 
-    def identify_objects(self, pointcloud_clusters):
-        '''
-        assigns labels to all object clusters in the pointcloud_clusters
-        args
-            pointcloud_clusters : clustered pointclouds
-        returns
-            objs : dictionary containing labels and spatial information of all the objects in the scene
-                    {obj_label: obj_pointcloud}
-        '''
-        os.makedirs(OUTPUT_FOLDER, exist_ok=True)
-        objs = {}
-        for i, cluster in enumerate(pointcloud_clusters):
-            # 1. move the camera on top of the cluster and take a picture
-            top_position = self.depth_processor.get_cluster_top_position(cluster)
-            self.manipulator.move_in_task_space(top_position)
-            rgb, depth, T_cb, intrinsics = self.get_observation()
-
-            # 2. run YOLO on the picture
-            detections, annotated_image = self.obj_detector.detect_objects(rgb)
-
-            # 3. project cluster center into the image, pick the box that contains it
-            center = cluster.get_axis_aligned_bounding_box().get_center()
-            u, v = self.depth_processor.project_world_to_image(center, intrinsics, T_cb)
-
-            best_label = None
-            best_distance = float("inf")
-            for label, bbox, confidence in detections:
-                x1, y1, x2, y2 = bbox
-                box_center_u = (x1 + x2) / 2
-                box_center_v = (y1 + y2) / 2
-                distance = np.sqrt((u - box_center_u) ** 2 + (v - box_center_v) ** 2)
-                inside_box = x1 <= u <= x2 and y1 <= v <= y2
-                # a box that contains the projected center is preferred over other boxes
-                if inside_box:
-                    distance = distance * 0.1
-                if distance < best_distance:
-                    best_distance = distance
-                    best_label = label
-
-            # draw projected cluster center as a blue dot and save image
-            cv2.circle(annotated_image, (int(u), int(v)), 6, (255, 0, 0), -1)
-            cv2.imwrite(f"{OUTPUT_FOLDER}/cluster_{i}.png", annotated_image)
-
-            if best_label is None:
-                print(f"Cluster {i}: no object detected, ignoring it")
-            else:
-                name = best_label.replace("Id", "")   # 'lemonId' -> 'lemon'
-                print(f"Cluster {i}: {name}  (center {np.round(center, 3)})")
-                # every object type is present only once, so if a label is seen twice
-                # (e.g. shelf leg next to plate) we keep the bigger cluster
-                if name in objs and len(objs[name].points) > len(cluster.points):
-                    print(f"   keeping the bigger cluster already stored for {name}")
-                else:
-                    objs[name] = cluster
-
-            # go back home before visiting next cluster (avoids hitting other objects)
-            self.manipulator.move_home()
-        return objs
-
-    def get_object_pick_pose(self, obj_label:str, objs:dict):
-        '''
-        returns 6D pose of the queried object: obj_label
-        args
-            obj_label : query object label
-            objs : dictionary containing labels and spatial information of all the objects in the scene
-        '''
-        points = np.asarray(objs[obj_label].points)
-        center = points.mean(axis=0)            # centroid of the cluster
-        max_height = points[:, 2].max()         # top of the object
-        # grasp a little below the top of the object, between fingers
-        grasp_height = max_height - 0.03
-        position = [center[0], center[1], grasp_height]
-        orientation = [np.pi, 0, 0]             # gripper facing down (crane grasp)
-        print(f"Pick pose of {obj_label}: {np.round(position, 3)}")
-        return position, orientation
-
-    def get_obj_place_pose(self, obj_label:str, target_obj_label:str, objs:dict):
-        '''
-        returns 6D target pose for object to be placed at target object location
-        args
-            obj_label : to be placed object label
-            target_obj_label : label of the object on which object is to be placed
-            objs : dictionary containing labels and spatial information of all the objects in the scene
-        '''
-        points = np.asarray(objs[target_obj_label].points)
-        center = points.mean(axis=0)
-        max_height = points[:, 2].max()
-        # release the object a bit above the plate so the fingers do not hit the plate
-        position = [center[0], center[1], max_height + 0.08]
-        orientation = [np.pi, 0, 0]
-        print(f"Place pose for {obj_label} on {target_obj_label}: {np.round(position, 3)}")
-        return position, orientation
-
     def exlpore_scene(self, exlporation_poses:list[list]):
         '''
-        explore the scene using generated exploration poses and return collected pointclouds
+        STEP 1.2 - explore the scene using generated exploration poses and return collected pointclouds
         args
             exploration_poses : list with set of proposed 7D joint positions fullfilling environment/scene exploration
         returns
@@ -196,6 +106,106 @@ class Perception:
             self.depth_processor.visualize_pointcloud(pointclouds)
         return pointclouds
 
+    def identify_objects(self, pointcloud_clusters):
+        '''
+        STEP 1.6 - assigns labels to all object clusters in the pointcloud_clusters
+        args
+            pointcloud_clusters : clustered pointclouds
+        returns
+            objs : dictionary containing labels and spatial information of all the objects in the scene
+                    {obj_label: obj_pointcloud}
+        '''
+        os.makedirs(OUTPUT_FOLDER, exist_ok=True)
+        objs = {}
+        for i, cluster in enumerate(pointcloud_clusters):
+            # 1. move the camera on top of the cluster and take a picture
+            top_position = self.depth_processor.get_cluster_top_position(cluster)
+            self.manipulator.move_in_task_space(top_position)
+            rgb, depth, T_cb, intrinsics = self.get_observation()
+
+            # 2. run YOLO on the picture
+            detections, annotated_image = self.obj_detector.detect_objects(rgb)
+
+            # 3. project cluster center into the image and pick the YOLO box closest to it
+            center = cluster.get_axis_aligned_bounding_box().get_center()
+            u, v = self.depth_processor.project_world_to_image(center, intrinsics, T_cb)
+            best_label = self.find_closest_box_label(u, v, detections)
+
+            # draw projected cluster center as a blue dot and save image
+            cv2.circle(annotated_image, (int(u), int(v)), 6, (255, 0, 0), -1)
+            cv2.imwrite(f"{OUTPUT_FOLDER}/cluster_{i}.png", annotated_image)
+
+            # 4. store the cluster under its label
+            if best_label is None:
+                print(f"Cluster {i}: no object detected, ignoring it")
+            else:
+                name = best_label.replace("Id", "")   # 'lemonId' -> 'lemon'
+                print(f"Cluster {i}: {name}  (center {np.round(center, 3)})")
+                # every object type is present only once, so if a label is seen twice
+                # (e.g. shelf leg next to plate) we keep the bigger cluster
+                if name in objs and len(objs[name].points) > len(cluster.points):
+                    print(f"   keeping the bigger cluster already stored for {name}")
+                else:
+                    objs[name] = cluster
+
+            # go back home before visiting next cluster (avoids hitting other objects)
+            self.manipulator.move_home()
+        return objs
+
+    def find_closest_box_label(self, u, v, detections):
+        '''
+        helper for identify_objects
+        returns the label of the YOLO box whose center is closest to pixel (u, v), or None
+        a box that contains (u, v) is preferred (its distance is made 10 times smaller)
+        '''
+        best_label = None
+        best_distance = float("inf")
+        for label, bbox, confidence in detections:
+            x1, y1, x2, y2 = bbox
+            box_center_u = (x1 + x2) / 2
+            box_center_v = (y1 + y2) / 2
+            distance = np.sqrt((u - box_center_u) ** 2 + (v - box_center_v) ** 2)
+            if x1 <= u <= x2 and y1 <= v <= y2:
+                distance = distance * 0.1
+            if distance < best_distance:
+                best_distance = distance
+                best_label = label
+        return best_label
+
+    def get_object_pick_pose(self, obj_label:str, objs:dict):
+        '''
+        used by planner (STEP 2.1) - returns 6D pose of the queried object: obj_label
+        args
+            obj_label : query object label
+            objs : dictionary containing labels and spatial information of all the objects in the scene
+        '''
+        points = np.asarray(objs[obj_label].points)
+        center = points.mean(axis=0)            # centroid of the cluster
+        max_height = points[:, 2].max()         # top of the object
+        # grasp a little below the top of the object, between fingers
+        grasp_height = max_height - 0.03
+        position = [center[0], center[1], grasp_height]
+        orientation = [np.pi, 0, 0]             # gripper facing down (crane grasp)
+        print(f"Pick pose of {obj_label}: {np.round(position, 3)}")
+        return position, orientation
+
+    def get_obj_place_pose(self, obj_label:str, target_obj_label:str, objs:dict):
+        '''
+        used by planner (STEP 2.1) - returns 6D target pose for object to be placed at target object location
+        args
+            obj_label : to be placed object label
+            target_obj_label : label of the object on which object is to be placed
+            objs : dictionary containing labels and spatial information of all the objects in the scene
+        '''
+        points = np.asarray(objs[target_obj_label].points)
+        center = points.mean(axis=0)
+        max_height = points[:, 2].max()
+        # release the object a bit above the plate so the fingers do not hit the plate
+        position = [center[0], center[1], max_height + 0.08]
+        orientation = [np.pi, 0, 0]
+        print(f"Place pose for {obj_label} on {target_obj_label}: {np.round(position, 3)}")
+        return position, orientation
+
 
 class DepthProcessor:
     def __init__(self,):
@@ -203,7 +213,7 @@ class DepthProcessor:
 
     def rgbd_to_pointcloud(self, rgb, depth, intrinsics, width, height):
         '''
-        returns a colored pointcloud in the camera frame
+        used in STEP 1.2 - returns a colored pointcloud in the camera frame
         args
             rgb : RGB image
             depth : depth image
@@ -234,7 +244,7 @@ class DepthProcessor:
 
     def transform_pointcloud(self, pointcloud:o3d.geometry.PointCloud, transform):
         '''
-        returns a pointcloud transformed in the target transform frame
+        used in STEP 1.2 - returns a pointcloud transformed in the target transform frame
         args
             pointcloud :
             transform :
@@ -248,7 +258,7 @@ class DepthProcessor:
 
     def register_pointclouds(self, pcds:list):
         '''
-        returns a poincloud aligned in a single frame
+        STEP 1.3 - returns a poincloud aligned in a single frame
         args
             pcds : list of pointclouds
         returns
@@ -275,32 +285,9 @@ class DepthProcessor:
             self.visualize_pointcloud([scene_pointcloud])
         return scene_pointcloud
 
-    def visualize_pointcloud(self, pcds:list[o3d.geometry.PointCloud]):
-        '''
-        this function will visualize the pointcloud(s) present in the list `pcds`
-        args
-            pcds: list of pointclouds to be visualized (could be single/multiple pointclouds)
-        '''
-        axes = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.2)  # robot base frame
-        o3d.visualization.draw_geometries(pcds + [axes])
-
-    def remove_plane(self, scene_pcd):
-        '''
-        this function removes a plane that maximally fits a plane equation (criterion)
-        args
-            scene_pcd : pointcloud of a scene
-        '''
-        # RANSAC: fit plane ax + by + cz + d = 0 to largest set of points
-        plane_model, inliers = scene_pcd.segment_plane(distance_threshold=0.01,
-                                                       ransac_n=3,
-                                                       num_iterations=1000)
-        plane_pcd = scene_pcd.select_by_index(inliers)
-        remaining_pcd = scene_pcd.select_by_index(inliers, invert=True)
-        return plane_model, plane_pcd, remaining_pcd
-
     def remove_planes(self, scene_pcd):
         '''
-        this function iteratively removes multiple planes from the scene_pcd
+        STEP 1.4 - this function iteratively removes multiple planes from the scene_pcd
         '''
         pcd = scene_pcd.voxel_down_sample(self.voxel_size)
         table_height = None
@@ -330,9 +317,23 @@ class DepthProcessor:
             self.visualize_pointcloud([pcd])
         return pcd
 
+    def remove_plane(self, scene_pcd):
+        '''
+        used in STEP 1.4 - this function removes a plane that maximally fits a plane equation (criterion)
+        args
+            scene_pcd : pointcloud of a scene
+        '''
+        # RANSAC: fit plane ax + by + cz + d = 0 to largest set of points
+        plane_model, inliers = scene_pcd.segment_plane(distance_threshold=0.01,
+                                                       ransac_n=3,
+                                                       num_iterations=1000)
+        plane_pcd = scene_pcd.select_by_index(inliers)
+        remaining_pcd = scene_pcd.select_by_index(inliers, invert=True)
+        return plane_model, plane_pcd, remaining_pcd
+
     def cluster_objects(self, scene_pcd):
         '''
-        this function clusters the pointcloud
+        STEP 1.5 - this function clusters the pointcloud
         args
             scene_pcd : merged pointcloud of the scene
         '''
@@ -367,6 +368,7 @@ class DepthProcessor:
 
     def get_cluster_top_position(self, cluster):
         '''
+        used in STEP 1.6 - position above the cluster where the camera takes a picture
         args
             cluster : a cluster from the clustered pointcloud which manipulator aims to understand
         '''
@@ -378,6 +380,7 @@ class DepthProcessor:
 
     def project_world_to_image(self, point_world, intrinsics, T_cb):
         """
+        used in STEP 1.6 - world point -> pixel (reverse of rgbd_to_pointcloud)
         args:
             point_world : (x,y,z) in robot base (world) frame
             intrinsics : list [fx, fy, cx, cy] - camera intrinsic parameters
@@ -394,3 +397,12 @@ class DepthProcessor:
         u = fx * X / Z + cx
         v = fy * Y / Z + cy
         return (u, v)
+
+    def visualize_pointcloud(self, pcds:list[o3d.geometry.PointCloud]):
+        '''
+        this function will visualize the pointcloud(s) present in the list `pcds`
+        args
+            pcds: list of pointclouds to be visualized (could be single/multiple pointclouds)
+        '''
+        axes = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.2)  # robot base frame
+        o3d.visualization.draw_geometries(pcds + [axes])

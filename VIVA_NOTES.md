@@ -92,6 +92,13 @@ projects in the image; the box containing it gives the cluster's label.
 * **Before the viva:** close heavy apps and plug in the charger; the simulation runs in real time, so a
   slow laptop makes the arm slower.
 
+### The `A4_progress` folder (only for the lab progress check)
+The half-finished copy lives only on the git branch **`lab-progress`** (run `git checkout lab-progress`
+to get it, and `git checkout main` to go back). In `A4_progress\`, steps 1.1–1.5 work, while 1.6, 2.1,
+2.2 and pick/place are `# TODO` stubs. Run it with `A4_progress\run_progress.bat`; it stops after
+clustering and shows the Open3D windows. `A4_progress\PROGRESS.md` has the done / to-do table. It is
+not part of the submission, which is why it is not on `main`.
+
 ### On the lab's Linux machine (official setup)
 If the demo must run on a Linux lab machine, use the course environment instead:
   ```
@@ -127,6 +134,72 @@ generate_exploration_poses → exlpore_scene → register_pointclouds → remove
 | 2.1 | `get_clear_task_plan` | list of actions: pick fruit → home → place on plate → home | plan list |
 | 2.2 | `execute_task_plan` | calls each Manipulator function in the plan | robot moves |
 
+### 3.1 Code map: where everything is (for "show me in the code" questions)
+
+Every function's docstring starts with the `main.py` step it belongs to (`STEP 1.4 - ...`), or says
+`used in STEP 1.2` if it is a helper. **To find any step in the code, search the file for "STEP 1.4"
+(or any other step number).**
+
+| File | Who wrote it | Contents |
+|---|---|---|
+| `main.py` | given (not edited) | calls the steps 1.1 → 2.2 in order |
+| `base.py` | given (not edited) | `Environment` (loads the scene), `PandaArm` (joint limits, home pose, finger gear constraint), `RGBDSensor` (hand camera) |
+| `control.py` | me | `Manipulator(PandaArm)`: robot motion, gripper, pick/place, runs the plan (step 2.2) |
+| `perception.py` | me | `ObjectDetector` (YOLO), `Perception` (moves the robot to look: steps 1.1, 1.2, 1.6 + pick/place poses), `DepthProcessor` (pure point-cloud maths: steps 1.3, 1.4, 1.5) |
+| `planning.py` | me | `Planner`: builds the plan (step 2.1) |
+
+Order of functions **inside `perception.py`** (inside each class they follow `main.py` order):
+
+```
+ObjectDetector   detect_objects
+Perception       get_observation
+                 generate_exploration_poses   STEP 1.1
+                 exlpore_scene                STEP 1.2
+                 identify_objects             STEP 1.6
+                 find_closest_box_label         (helper for 1.6)
+                 get_object_pick_pose           (used by planner, 2.1)
+                 get_obj_place_pose             (used by planner, 2.1)
+DepthProcessor   rgbd_to_pointcloud             (helper for 1.2)
+                 transform_pointcloud           (helper for 1.2)
+                 register_pointclouds         STEP 1.3
+                 remove_planes                STEP 1.4
+                 remove_plane                   (helper for 1.4, one RANSAC plane)
+                 cluster_objects              STEP 1.5
+                 get_cluster_top_position       (helper for 1.6)
+                 project_world_to_image         (helper for 1.6)
+                 visualize_pointcloud           (only when VISUALIZE = True)
+```
+
+**Why the split into `Perception` and `DepthProcessor`?** (both class names come from the template)
+* `Perception` **moves the robot and uses the camera / YOLO** (it needs the manipulator).
+* `DepthProcessor` **only does maths on point clouds**. It never moves the robot, so it can be tested
+  on saved clouds.
+
+**Who owns what (object diagram):**
+```
+main.py
+ ├─ Environment            (base.py) loads plane, table, robot, shelf, plate, objects
+ ├─ Manipulator            (control.py)  inherits PandaArm (base.py)
+ ├─ Perception             (perception.py)
+ │    ├─ RGBDSensor        (base.py)
+ │    ├─ ObjectDetector    (YOLO weights/best.pt)
+ │    └─ DepthProcessor
+ ├─ Planner                (planning.py)
+ │    └─ its own Perception  (only used for get_object_pick_pose / get_obj_place_pose)
+ └─ DepthProcessor         (used by main for steps 1.3–1.5)
+```
+
+**What each step hands to the next (data types):**
+| Between | Type |
+|---|---|
+| 1.1 → 1.2 | `list` of 14 lists, each with 7 joint angles (radians) |
+| 1.2 → 1.3 | `list` of 14 `open3d.geometry.PointCloud`, already in world frame |
+| 1.3 → 1.4 | one `PointCloud` (~190k points) |
+| 1.4 → 1.5 | one `PointCloud` (~8.5–9.5k points, only objects) |
+| 1.5 → 1.6 | `list` of `PointCloud`, one per cluster (8 in default scene) |
+| 1.6 → 2.1 | `dict` `{'lemon': PointCloud, 'plate': PointCloud, ...}` |
+| 2.1 → 2.2 | `list` of `(function_name, [args])`, e.g. `("pick_object_from", [[x,y,z], [π,0,0]])` |
+
 ## 4. control.py: Manipulator (robot motion)
 
 * **`get_joint_positions()`** (helper I added): reads the 7 joint angles with `p.getJointStates`. This is
@@ -153,6 +226,8 @@ generate_exploration_poses → exlpore_scene → register_pointclouds → remove
   calls the function, so the plan is plain data and the robot just executes it.
 
 ## 5. perception.py
+
+The subsections below follow the pipeline steps. Section 3.1 lists the order in the file.
 
 ### ObjectDetector.detect_objects(rgb)
 1. RGB → BGR with `cv2.cvtColor` (OpenCV/YOLO expects BGR; the assignment asks for this explicitly).
@@ -232,11 +307,21 @@ For each cluster:
 2. `move_in_task_space` there (gripper/camera facing down) and take an image.
 3. Run YOLO.
 4. **Project the cluster centre into the image** with `project_world_to_image`, then choose the box
-   that contains that pixel (or the nearest box). This matters because one image can show several
-   fruits.
+   that contains that pixel (or the nearest box) with the helper `find_closest_box_label`. This
+   matters because one image can show several fruits.
 5. Store `objs[name] = cluster`. If a label appears twice (e.g. a shelf leg seen as "plate"), keep the
    **bigger** cluster, since each object type appears only once.
 6. Go back home before the next cluster (avoids hitting things).
+
+The image with YOLO boxes and a blue dot (the projected centre) is saved as `outputs/cluster_i.png`.
+
+### find_closest_box_label(u, v, detections) (helper for identify_objects)
+For each YOLO box: distance = distance from pixel (u, v) to the box centre. If (u, v) is **inside**
+the box, the distance is multiplied by 0.1, so a box that contains the point almost always wins. It
+returns the label with the smallest distance, or `None` if YOLO found nothing (then the cluster is ignored).
+*Why not just "inside the box"?* The projected centre can land slightly outside a tight box (camera
+offset, partial view), so the nearest box is a fallback.
+*Why a separate function?* So `identify_objects` reads as 4 clear steps (look → detect → match → store).
 
 ### project_world_to_image(point, intrinsics, T_cb)
 The reverse of the point-cloud formula: `p_cam = inv(T_cb) · p_world`, then
@@ -371,3 +456,140 @@ position in the base frame, bottom row [0 0 0 1].
 **Q: How are depth values computed in base.py?**
 The PyBullet depth buffer is non-linear (0–1). `base.py` converts it to metric depth with
 `far·near / (far − (far − near)·d)`.
+
+## 10. More viva questions, grouped by type
+
+### 10.1 Codebase questions ("show me in the code")
+
+**Q: Walk me through what happens when I run main.py.**
+Follow the table in section 3 and the code map in 3.1. Open `main.py`, read the step comments, and for
+each step search `perception.py` / `planning.py` / `control.py` for `STEP x.y`.
+
+**Q: Which files did you write and which were given?**
+Given: `main.py`, `base.py`, assets, YOLO weights, `init_state.json`. Mine: the function bodies in
+`control.py`, `perception.py`, `planning.py`. The class and function names come from the template
+(that is why `exlpore_scene` is misspelled: `main.py` calls it with that name, so it cannot be renamed).
+
+**Q: Which functions did you add yourself (not in the template)?**
+`get_joint_positions` (control.py), `find_closest_box_label` (perception.py), and the `offset`
+argument of `pick_place_object_plan` (planning.py). Everything else fills in a template function.
+
+**Q: Why does `Manipulator` inherit from `PandaArm`?**
+`PandaArm` (base.py) holds the robot constants: joint indices, joint limits, home pose, finger
+open/closed values, end-effector index 11. It also creates the finger gear constraint. Inheriting gives
+`Manipulator` all of these as `self.JOINT_LOWER_LIMITS` and so on without copying them.
+
+**Q: How does `execute_task_plan` know which function to call?**
+Each plan step is `("pick_object_from", [pos, orn])`. `getattr(self, "pick_object_from")` returns
+the method, and `function(*args)` calls it with the arguments. With a wrong name, Python raises
+`AttributeError`.
+
+**Q: Why is the plan a list of names and not direct function calls?**
+It separates *deciding* (Planner) from *doing* (Manipulator). The plan can be printed and checked
+before the robot moves, and the planner never touches PyBullet.
+
+**Q: Why does `Planner` create its own `Perception`?**
+The template's `Planner.__init__` does it. The planner only uses its `get_object_pick_pose` /
+`get_obj_place_pose`. Side effect: YOLO is loaded a second time (a few seconds of extra start-up). It
+would be cleaner to pass in the existing `Perception`, but the template constructor was kept.
+
+**Q: Why are both `Perception` and `DepthProcessor` there?**
+`Perception` moves the robot and uses the camera and YOLO. `DepthProcessor` only does point-cloud maths
+(no robot), so it is reusable and testable on its own. See 3.1.
+
+**Q: What are `VISUALIZE` and `OUTPUT_FOLDER` at the top of perception.py?**
+`VISUALIZE = True` opens an Open3D window after steps 1.2–1.5 (for demos and debugging).
+`OUTPUT_FOLDER = "./outputs"` is where `identify_objects` saves the YOLO images. Neither changes what
+the robot does.
+
+**Q: Where are all the tuning numbers?**
+
+| Number | Where | Meaning |
+|---|---|---|
+| 7 yaws × 2 wrist tilts (1.49, 1.85) | `generate_exploration_poses` | 14 viewpoints |
+| 1.5 m | `rgbd_to_pointcloud` | drop background points |
+| 0.005 | `DepthProcessor.__init__` | 5 mm voxel size |
+| 0.02 | `register_pointclouds` | ICP max correspondence distance |
+| 0.01 / 3 / 1000 | `remove_plane` | RANSAC threshold / sample size / iterations |
+| 0.99, 10000 | `remove_planes` | "horizontal" and "big" plane checks |
+| +0.01 | `remove_planes` | crop everything up to 1 cm above the table |
+| eps 0.02, min_points 20 | `cluster_objects` | DBSCAN |
+| 100 points, 0.2 m | `cluster_objects` | drop noise / robot points |
+| +0.30, −0.04 | `get_cluster_top_position` | camera 30 cm above object, 4 cm camera offset |
+| ×0.1 | `find_closest_box_label` | preference for a box that contains the point |
+| −0.03 / +0.08 | pick / place pose | grasp below the top / release above the plate |
+| ±0.04 | `get_clear_task_plan` | spread fruits on the plate |
+| 0.20 / 0.05 / 0.25, 0.15 | pick / place sequence | approach and lift heights |
+| maxVelocity 0.8, force 200 / 300 | `move_joints` / `command_gripper` | slow arm, strong grip |
+| 0.01 rad, 10 s | `move_joints` | "arrived" tolerance and timeout |
+
+### 10.2 Simulation questions (PyBullet)
+
+**Q: How does time work in this simulation?**
+`base.py` calls `p.setRealTimeSimulation(1)`, so PyBullet steps the physics by itself in real time. Our
+code never calls `stepSimulation`. It sends a motor target, then **waits** (`time.sleep` loop in
+`move_joints`, 1 s sleep in `command_gripper`) until the robot gets there.
+
+**Q: What does `POSITION_CONTROL` mean?**
+PyBullet runs a motor controller (PD-like) per joint that drives it to `targetPosition`. `force` is
+the maximum torque/force the motor may use, and `maxVelocity` caps its speed.
+
+**Q: How do the two fingers move together?**
+`PandaArm.create_finger_constraint` (base.py) adds a `JOINT_GEAR` constraint between finger joints 9
+and 10 with `gearRatio = -1`, so they move symmetrically (one opens as the other opens).
+
+**Q: What is link 11?**
+`panda_grasptarget`: a virtual point between the fingertips. Doing IK for this link means "put the
+**middle of the fingers** at the target", which is exactly where the fruit should be.
+
+**Q: How does the robot hold the fruit? Is it attached?**
+No constraint is created. The fruit is held only by **contact and friction** between fingers and
+fruit (the fruit URDFs have mass 1 kg and friction 0.5). That is why moving too fast threw the fruit (section 8).
+
+**Q: What camera is simulated?**
+`RGBDSensor` in `base.py`: 640×480, 70° field of view, near 0.047 m, far 2 m, rendered with
+PyBullet's TinyRenderer from a point 4 cm in front of / 2 cm below the hand, looking along the hand's
+z-axis. The depth buffer is converted to metres (see section 9).
+
+**Q: Why does a run take ~5 minutes?**
+Real-time physics, a slow arm (`maxVelocity 0.8`), 14 exploration poses, a visit above each of the 8
+clusters, and going home between every pick and place.
+
+**Q: What is different from a real robot? (sim-to-real gap)**
+Simulated depth is perfect: no noise, no holes on shiny or dark surfaces, perfect calibration (exact
+`T_cb`). Real joints have backlash and real grasps slip. On a real robot ICP and outlier removal matter
+more, and the camera must be calibrated (intrinsics + hand-eye calibration).
+
+**Q: How do you know objects are on the plate without ground truth?**
+The submitted code does not check this. For testing only, a separate script read the true positions
+**after** the task (section 2). A real robot could check by looking again with the camera.
+
+### 10.3 Conceptual questions
+
+**Q: Intrinsics vs extrinsics?**
+Intrinsics (`fx, fy, cx, cy`) describe the camera itself: pixel ↔ ray. Extrinsics (`T_cb`) describe
+where the camera is: camera frame ↔ base frame. You need both to go from a pixel and its depth to a
+world point.
+
+**Q: Why 4×4 matrices (homogeneous coordinates)?**
+A 4×4 matrix does rotation **and** translation in one multiplication (`[x y z 1]`), and transforms can
+be chained by multiplying matrices (`T_ab · T_bc = T_ac`). Inverse: `inv(T_cb)` takes world → camera
+(used in `project_world_to_image`).
+
+**Q: What overall architecture is this?**
+**Sense → Plan → Act**: perceive the whole scene once (Part I), make the full plan (2.1), then execute
+it (2.2). It is **open-loop** during execution: the robot does not look again while picking. That is
+fine in simulation, but a real system would re-check (closed loop).
+
+**Q: How does YOLO work (briefly)?**
+A one-stage detector: one CNN pass predicts boxes, class scores and confidences for the whole image.
+Overlapping duplicate boxes are removed with Non-Maximum Suppression (NMS). We used weights
+(`best.pt`) already trained on these 6 object classes.
+
+**Q: Why combine 3D clustering with 2D detection instead of using only one?**
+YOLO says **what** an object is but only in 2D (no depth/position). The clusters give **where** it is
+in 3D but not what it is. Projecting the cluster into the image links the two.
+
+**Q: Why not just use the depth inside the YOLO box to find the object?**
+The box also contains table and background pixels, so its depth is mixed. The cluster contains only
+the object's points, which gives a clean centroid and top height.
