@@ -1,19 +1,17 @@
 
 from perception import Perception
-import numpy as np
-
-
-
 
 class Planner:
+    """Build a list of movements from the objects found by the camera."""
     def __init__(self, manipulator):
         self.perceptor = Perception(manipulator)
 
     def get_clear_task_plan(self, objs):
-        '''
-        STEP 2.1 - returns a sequential action plan executable by manipulator to place all the objects in the plate
-        you can write the plans for specific objects such that plan steps are manipulator function calls, and robust to object location randomization
-        '''
+        """STEP 2.1: Plan a pick and place for each fruit, using sensed positions.
+
+        Return an empty plan if the plate is missing. The scene has at most one
+        object of each type; the wooden block stays in place as an obstacle.
+        """
         # find the plate among the detected objects
         plate_label = None
         for label in objs:
@@ -27,7 +25,7 @@ class Planner:
         fruits = [label for label in objs if not label.startswith("plate") and not label.startswith("wood_block")]
         print("Objects to put in plate:", fruits)
 
-        # small shift for every fruit so they do not fall on top of each other in the plate
+        # Spread the release positions by 4 cm to reduce stacking on the plate.
         offsets = [[0.04, 0], [-0.04, 0], [0, 0.04], [0, -0.04], [0, 0]]
 
         plan = [("move_home", [])]
@@ -36,13 +34,12 @@ class Planner:
             plan += self.pick_place_object_plan(fruit, plate_label, objs, offset)
         return plan
 
-    def pick_place_object_plan(self, obj_label, place_location_label, objs, offset=[0, 0]):
-        '''
-        returns a sequential action plan executable by manipulator to pick a object and place it at a specified location
-        args
-            obj_label : label of object to pick
-            place_location label : label of object on which the object is to be placed
-        '''
+    def pick_place_object_plan(self, obj_label, place_location_label, objs, offset=(0, 0)):
+        """Plan one fruit's pick, return home, place, and return home again.
+
+        offset shifts the release position in x and y, measured in metres.
+        Returning home reduces collision risk, but does not guarantee a clear path.
+        """
         pick_position, pick_orientation = self.perceptor.get_object_pick_pose(obj_label, objs)
         place_position, place_orientation = self.perceptor.get_obj_place_pose(obj_label, place_location_label, objs)
         place_position = [place_position[0] + offset[0], place_position[1] + offset[1], place_position[2]]
