@@ -1,595 +1,979 @@
-# A4 – Robot Grasping with Eye-in-Hand RGB-D Camera: Viva Notes
+# A4: robot grasping with a camera on the hand
 
-## 1. What the assignment asks (in one paragraph)
+These notes explain the current code, help you practise viva answers, and show how to run the demo. They assume basic Python knowledge; robotics terms are explained as they appear.
 
-A Franka Panda arm in PyBullet has an RGB-D camera on its hand ("eye-in-hand"). The robot knows its own
-joint angles, but it **does not know where the objects are**. We are **not allowed** to use
-`p.getBasePositionAndOrientation` or `p.getCameraImage` directly. Only the provided sensor
-(`RGBDSensor.get_observation`) may be used. The robot must:
+Last checked: 28 October 2026. Test results and platform limits are recorded in section 10.
 
-* **Part I (perception):** look around, build a 3D point cloud of the table, remove the table/floor,
-  split the remaining points into objects, and label each object with YOLOv8.
-* **Part II (manipulation):** pick every fruit (lemon, orange, peach, plum) and put it on the plate,
-  which sits on a small shelf. The wooden block is an obstacle that is not moved.
+Use [section 2](#2-how-to-run-and-demonstrate-the-project) to run the demo, [sections 3 to 7](#3-where-the-code-is-and-how-data-moves-through-it) to understand the code, and [section 9](#9-viva-questions-with-answers-you-can-practise-aloud) to practise answers.
 
-Only `control.py`, `perception.py` and `planning.py` were edited (the files marked red in the assignment).
+## 1. What the project does
 
-## 2. How to run and demo on my laptop
+A Franka Panda robot arm must find fruits on a table and put them on a plate. A camera attached to its hand provides colour images and depth images. The robot estimates object positions from those observations.
 
-Everything is already installed on this laptop. The Python environment is at
-`C:\Users\Akhil Reddy\micromamba\envs\a4_2026`. A full run takes about 5 minutes.
+The robot knows its own joint angles. The assignment code must not ask the simulator directly where an object is. It must use `RGBDSensor.get_observation` to observe the scene. The supplied sensor helper uses simulator rendering internally; that is part of the provided setup.
 
-### Option A: easiest (double-click)
-1. Open the folder `D:\My Stuff\sem5\AI For Autonomous Systems\Final_Assignment` in File Explorer.
-2. Double-click **`run_demo.bat`**.
-3. A black terminal window opens and shows the progress text, then the **PyBullet window** opens with the
-   robot, table, fruits, wooden block and plate on the shelf.
-4. Don't click inside the PyBullet window while it runs. Watch it happen (see "What the examiner will
-   see" below).
-5. When the terminal prints `Task plan finished`, it is done. Press any key in the terminal to close it.
+The task has two parts:
 
-### Option B: from a terminal (looks more professional in a viva)
-**PowerShell** (the default terminal in VS Code and Windows Terminal):
+- Perception: look around, build a 3D view of the scene, separate possible objects, and identify them.
+- Manipulation: use the estimated positions to pick the detected fruits and place them on the plate.
+
+The fruit classes are lemon, orange, peach, and plum. The plate is the destination. The wooden block stays in place as an obstacle. The current object dictionary supports at most one object of each type.
+
+### A short explanation to practise aloud
+
+> We use a camera mounted on the robot's hand to observe the table from several positions. Each colour and depth image becomes a set of 3D points. We combine the views, remove large flat surfaces, and group the remaining points into possible objects. YOLO identifies the objects in colour images. We connect those detections to the 3D groups, estimate pick and place positions, and move the fruits to the plate.
+
+### Terms used throughout the notes
+
+| Term | Meaning in this project |
+|---|---|
+| RGB image | A colour image with red, green, and blue channels. |
+| Depth image | An image giving the distance along the camera's viewing axis at each pixel, in metres. |
+| RGB-D | Colour and depth observations captured together. |
+| Eye-in-hand | A camera attached to the robot's hand, so it moves with the arm. |
+| Point cloud | A collection of 3D points describing visible surfaces. Each point can also have a colour. |
+| Cluster | A group of nearby points that may belong to one object or part of an object. |
+| Centroid | The average position of a set of points. |
+| Bounding box | A rectangle around a detection in an image, or a box around points in 3D. |
+| Joint configuration | The list of angles for the arm's seven rotating joints. |
+| End effector | The working end of the robot. Here, it is the hand and gripper. |
+| Pose | A position together with an orientation. |
+| Coordinate frame | A reference origin and x, y, z directions used to describe positions. |
+| Ground truth | The simulator's exact information, such as the true object positions. |
+| Occlusion | A surface is hidden behind another object and cannot be seen from that view. |
+
+Positions and distances in the code are in metres. Joint angles and Euler orientation angles are in radians: `pi` radians is 180 degrees.
+
+## 2. How to run and demonstrate the project
+
+### 2.1 Run on the Mac using the existing environment
+
+The project now has a separate `.venv` environment. From the project folder, run:
+
+```bash
+source .venv/bin/activate
+cd A4/src
+python main.py
 ```
-cd "D:\My Stuff\sem5\AI For Autonomous Systems\Final_Assignment\A4\src"
+
+Run `source .venv/bin/activate` again when opening a new terminal. Once you are already in `A4/src`, run `python main.py` to repeat the demo.
+
+The working directory matters. The starter code loads `./init_state.json`, `./assets/...`, and `./weights/best.pt` relative to the current folder. Running from `A4/src` makes those paths resolve correctly.
+
+The Mac test environment uses Python 3.12.14, Open3D 0.19.0, Ultralytics 8.4.21, NumPy 2.0.2, PyTorch 2.8.0, and a locally built standard PyBullet 3.2.7. The course's Linux environment uses different platform builds.
+
+PyBullet can run on Apple Silicon. Its standard package needed a build setting to avoid a conflict between its bundled older zlib code and the current Mac SDK: `CFLAGS=-Dfdopen=fdopen`. The successful build also had NumPy support enabled, which the sensor helper needs for image arrays. This setting was used while building the dependency, not in the assignment source files.
+
+A separate package, [pybullet-arm64](https://pypi.org/project/pybullet-arm64/), also offers Mac ARM build fixes and uses the same `import pybullet` interface. The tests recorded here used standard PyBullet, not that fork. Do not install both packages into one environment because they provide the same module.
+
+### 2.2 Run on Windows
+
+Use the Windows Python environment that has the assignment packages installed. A Mac `.venv` cannot be copied to Windows and used there; each operating system needs its own environment.
+
+The existing `run_demo.bat` expects this interpreter:
+
+```text
+%USERPROFILE%\micromamba\envs\a4_2026\python.exe
+```
+
+If that is where the environment is installed, double-click `run_demo.bat` in the project folder. The script changes into `A4/src`, runs the program, and pauses afterward so the terminal stays open.
+
+To run the same environment manually, open PowerShell in the project folder:
+
+```powershell
+Set-Location .\A4\src
 & "$env:USERPROFILE\micromamba\envs\a4_2026\python.exe" main.py
 ```
-**Command Prompt (cmd)**:
+
+If the teammate instead has a Windows `.venv` in the project folder, use:
+
+```powershell
+Set-Location .\A4\src
+& ..\..\.venv\Scripts\python.exe main.py
 ```
-cd /d "D:\My Stuff\sem5\AI For Autonomous Systems\Final_Assignment\A4\src"
+
+In Command Prompt, an example using micromamba is:
+
+```bat
+cd /d "D:\path\to\project\A4\src"
 "%USERPROFILE%\micromamba\envs\a4_2026\python.exe" main.py
 ```
-Always run from inside `A4\src`, because the code loads `./init_state.json`, `./assets/...` and
-`./weights/best.pt` with relative paths. Running from another folder gives "file not found".
 
-### What the examiner will see (and what to say)
-| On screen | Terminal prints | Say |
+Replace the example project path with the actual folder. If the interpreter is installed elsewhere, use its actual path. The old notes referred to a specific laptop and drive; those paths are not shared setup requirements.
+
+### 2.3 The course's Linux setup
+
+The handout recommends Linux with a display. For that environment, the supplied commands are:
+
+```bash
+cd A4
+conda env create -f a4_2026.yml
+conda activate a4_2026
+cd src
+python main.py
+```
+
+The environment file contains Linux-specific package builds. It is not a portable Mac or Windows installation recipe. Keep the course environment file as supplied for evaluation, and do not add new submission dependencies just to solve a local setup problem.
+
+### 2.4 What to watch during the demo
+
+| Stage | What you see or read | A simple explanation to give |
 |---|---|---|
-| Arm sweeps left→right twice, pausing at each pose | `Pose 1/14 ... Pose 14/14` | "Exploration: 14 viewpoints, 180° yaw sweep at 2 wrist tilts, one RGB-D image each" |
-| Arm goes home, pauses a few seconds | `ICP view 1: fitness..., rmse...` | "Merging the 14 point clouds; ICP refines alignment" |
-| (no motion) | `Removed plane 1: z=-0.579` / `Removed plane 2: z=0.045` | "RANSAC removed the floor and the table top" |
-| (no motion) | `Cluster 0..7 ... Found 8 object clusters` | "DBSCAN found 8 groups of points" |
-| Arm goes above each object, then back home | `Cluster 0: lemon ...` etc. | "Camera looks down at each cluster; YOLO labels it" |
-| (no motion) | `Objects to put in plate: [...]`, pick/place poses | "Planner made the plan from the perceived positions" |
-| Arm picks each fruit from above, carries it to the plate | `Step 1/17 ... Step 17/17` | "Crane grasp: down from above, close, lift, place in plate" |
+| Exploration | The arm moves through its scan poses; the terminal prints `Pose 1/14`, and so on. | We are observing the table from different directions. |
+| Combining views | The arm pauses while the terminal prints ICP fitness and error values. | We are aligning and combining the 3D points from those views. |
+| Plane removal | The terminal reports removed planes and how many points remain. | We are removing large flat surfaces such as the floor and table. |
+| Clustering | The terminal prints the groups of points it found. | We are separating possible objects without supplying an object count. |
+| Identification | The arm visits viewpoints above clusters and returns home between visits. | We are connecting image detections to the groups of 3D points. |
+| Planning | The terminal lists fruits and estimated pick and place positions. | We are deciding which actions to perform using the perceived scene. |
+| Execution | The arm picks and places one fruit at a time. | We approach from above, grip, lift, carry, and release the fruit. |
 
-### Show the point clouds (optional, very good for the viva)
-1. Open `A4\src\perception.py` and change line 11 (`VISUALIZE = False`, near the top) to `VISUALIZE = True`.
-2. Run as above. An **Open3D window** appears at 4 stages: the 14 raw clouds → the merged cloud → after
-   plane removal (only objects left) → the clusters in random colours.
-3. In the Open3D window: **left-drag** rotates, **scroll** zooms, **right-drag / ctrl+drag** moves.
-   The red/green/blue axes are the robot base frame (x/y/z). **Close the window** to let the
-   program continue. The robot waits while the window is open.
-4. **Set it back to `VISUALIZE = False`** before submitting.
+In the tested default scene there were 14 scan poses, 8 clusters, 4 fruits, and 17 planned actions. These are results for that scene, not required counts for every run. Some clusters describe parts of the shelf rather than separate movable objects.
 
-### Show the YOLO detections
-After a run, open `A4\src\outputs\`. `cluster_0.png`, `cluster_1.png`, ... are the images taken above
-each cluster, with YOLO boxes, labels and confidence. The **blue dot** is where that cluster's 3D centre
-projects in the image; the box containing it gives the cluster's label.
+At normal completion, the program prints:
 
-### Show it works on a different scene (proves it is not hard-coded)
-1. Make a copy of `A4\src\init_state.json` as a backup (e.g. `init_state_original.json`).
-2. Edit `init_state.json` and change positions, for example put the plate on the other side:
-   ```json
-   {"num_objects": 5, "shelf_position": [0.1, -0.5, 0.05],
-    "objects": {"lemon": [0.45, 0.2, 0.07], "orange": [0.6, 0.05, 0.07],
-                "peach": [0.35, 0.3, 0.07], "plum": [0.55, 0.3, 0.08],
-                "wood_block": [0.65, -0.25, 0.12]}}
-   ```
-   (This scene was tested: 4/4.) Keep objects on the table (x ≈ 0.3–0.7, y ≈ −0.4–0.4), at least
-   ~8 cm apart, and not on top of each other.
-3. Run again. **Restore the original file before submitting.**
-
-### If something goes wrong
-* **"No such file or directory: ./init_state.json" / weights not found:** you are not in `A4\src`.
-  `cd` there first.
-* **"python is not recognized" or the wrong Python:** use the full path to the environment's
-  `python.exe` exactly as above (plain `python` is a different Python 3.13 without these packages).
-* **The window seems frozen for a few seconds:** this is normal during ICP/RANSAC/DBSCAN and YOLO
-  loading. Watch the terminal text.
-* **The program waits forever with `VISUALIZE = True`:** close the Open3D window.
-* **To stop a run:** close the PyBullet window or press `Ctrl+C` in the terminal.
-* **Before the viva:** close heavy apps and plug in the charger; the simulation runs in real time, so a
-  slow laptop makes the arm slower.
-
-### The `A4_progress` folder (only for the lab progress check)
-The half-finished copy lives only on the git branch **`lab-progress`** (run `git checkout lab-progress`
-to get it, and `git checkout main` to go back). In `A4_progress\`, steps 1.1–1.5 work, while 1.6, 2.1,
-2.2 and pick/place are `# TODO` stubs. Run it with `A4_progress\run_progress.bat`; it stops after
-clustering and shows the Open3D windows. `A4_progress\PROGRESS.md` has the done / to-do table. It is
-not part of the submission, which is why it is not on `main`.
-
-### On the lab's Linux machine (official setup)
-If the demo must run on a Linux lab machine, use the course environment instead:
-  ```
-  cd A4
-  conda env create -f a4_2026.yml
-  conda activate a4_2026
-  cd src
-  python main.py
-  ```
-  `main.py` must be run from inside `src`, because the asset and weight paths are relative.
-
-Results measured on 3 different scenes: **11/11 fruits placed on the plate**
-(default scene 4/4, plate on opposite side 4/4, a 3-fruit scene 3/3).
-*How this was measured:* a separate test script (not part of the submission) ran the same pipeline. Only
-**after** the task finished did it read the true fruit positions from PyBullet to check whether each fruit
-was on the plate. The submitted code never uses ground truth.
-
-## 3. The pipeline (the order in main.py)
-
-```
-generate_exploration_poses → exlpore_scene → register_pointclouds → remove_planes
-→ cluster_objects → identify_objects → get_clear_task_plan → execute_task_plan
+```text
+All planned movements finished; placement success has not been checked
 ```
 
-| Step | Function | What it does | Output |
-|---|---|---|---|
-| 1.1 | `generate_exploration_poses` | 14 joint configurations around the table | list of 7-joint lists |
-| 1.2 | `exlpore_scene` | move to each pose, take RGB-D, make point cloud in world frame | 14 point clouds |
-| 1.3 | `register_pointclouds` | refine alignment with ICP and merge | 1 point cloud (~190k pts) |
-| 1.4 | `remove_planes` | RANSAC removes floor and table | ~9.5k object points |
-| 1.5 | `cluster_objects` | DBSCAN splits points into objects | list of clusters |
-| 1.6 | `identify_objects` | camera goes above each cluster, YOLO labels it | `{'lemon': cluster, ...}` |
-| 2.1 | `get_clear_task_plan` | list of actions: pick fruit → home → place on plate → home | plan list |
-| 2.2 | `execute_task_plan` | calls each Manipulator function in the plan | robot moves |
+This means the action list finished. The submitted program does not look again to confirm that every fruit reached the plate. The separate test script checked final placement afterward.
 
-### 3.1 Code map: where everything is (for "show me in the code" questions)
+The older Windows notes estimated about five minutes for an interactive run. Runtime depends on the hardware, object count, processing, and movement waits. The recent headless tests (without a display window) used a different simulation clock, so they do not measure GUI demo time.
 
-Every function's docstring starts with the `main.py` step it belongs to (`STEP 1.4 - ...`), or says
-`used in STEP 1.2` if it is a helper. **To find any step in the code, search the file for "STEP 1.4"
-(or any other step number).**
+### 2.5 Show the point clouds
 
-| File | Who wrote it | Contents |
-|---|---|---|
-| `main.py` | given (not edited) | calls the steps 1.1 → 2.2 in order |
-| `base.py` | given (not edited) | `Environment` (loads the scene), `PandaArm` (joint limits, home pose, finger gear constraint), `RGBDSensor` (hand camera) |
-| `control.py` | me | `Manipulator(PandaArm)`: robot motion, gripper, pick/place, runs the plan (step 2.2) |
-| `perception.py` | me | `ObjectDetector` (YOLO), `Perception` (moves the robot to look: steps 1.1, 1.2, 1.6 + pick/place poses), `DepthProcessor` (pure point-cloud maths: steps 1.3, 1.4, 1.5) |
-| `planning.py` | me | `Planner`: builds the plan (step 2.1) |
+In `perception.py`, find `VISUALIZE = False` near the top and change it to `True` for a local demonstration.
 
-Order of functions **inside `perception.py`** (inside each class they follow `main.py` order):
+Open3D then shows the collected clouds, the combined cloud, the points after plane removal, and the clusters. The red, green, and blue axes mark the robot-base x, y, and z directions. Close each window to let the program continue.
 
-```
-ObjectDetector   detect_objects
-Perception       get_observation
-                 generate_exploration_poses   STEP 1.1
-                 exlpore_scene                STEP 1.2
-                 identify_objects             STEP 1.6
-                 find_closest_box_label         (helper for 1.6)
-                 get_object_pick_pose           (used by planner, 2.1)
-                 get_obj_place_pose             (used by planner, 2.1)
-DepthProcessor   rgbd_to_pointcloud             (helper for 1.2)
-                 transform_pointcloud           (helper for 1.2)
-                 register_pointclouds         STEP 1.3
-                 remove_planes                STEP 1.4
-                 remove_plane                   (helper for 1.4, one RANSAC plane)
-                 cluster_objects              STEP 1.5
-                 get_cluster_top_position       (helper for 1.6)
-                 project_world_to_image         (helper for 1.6)
-                 visualize_pointcloud           (only when VISUALIZE = True)
+For the standard Open3D viewer, drag with the left mouse button to rotate, scroll to zoom, and use Ctrl plus left-drag to move the view sideways. Press `H` for help when the window has keyboard focus. These controls are described in the [Open3D visualization guide](https://www.open3d.org/docs/0.19.0/tutorial/visualization/visualization.html).
+
+The robot waits while these display windows are open. Restore `VISUALIZE = False` before submission or an unattended run.
+
+### 2.6 Show the detection images
+
+After a normal run, look in `A4/src/outputs/`. Files such as `cluster_0.png` show the YOLO boxes, class names, and confidence scores. A blue dot marks the projected cluster centre when it falls inside the image.
+
+Use the image to explain the connection between a 3D cluster and a 2D detection. A box must contain the projected point to be considered a match. The separate automated tests saved their images outside the repository, so those runs do not populate the normal outputs folder.
+
+### 2.7 Try a different scene
+
+For local testing, back up `A4/src/init_state.json` before changing it. Restore the original before submission, as the handout requires.
+
+The following scene puts the plate on the opposite side and moves the fruits. It matches the alternate scene used in the recent full pipeline test:
+
+```json
+{
+  "num_objects": 6,
+  "shelf_position": [0.1, -0.5, 0.05],
+  "objects": {
+    "lemon": [0.45, 0.2, 0.07],
+    "orange": [0.6, 0.05, 0.07],
+    "peach": [0.35, 0.3, 0.07],
+    "plum": [0.55, 0.3, 0.08],
+    "wood_block": [0.68, 0.26, 0.12]
+  }
+}
 ```
 
-**Why the split into `Perception` and `DepthProcessor`?** (both class names come from the template)
-* `Perception` **moves the robot and uses the camera / YOLO** (it needs the manipulator).
-* `DepthProcessor` **only does maths on point clouds**. It never moves the robot, so it can be tested
-  on saved clouds.
+`Environment` loads objects by looping over the `objects` dictionary; it does not use `num_objects` to control that loop. Assignment logic must not use either the coordinates or that count as knowledge of the scene.
 
-**Who owns what (object diagram):**
-```
-main.py
- ├─ Environment            (base.py) loads plane, table, robot, shelf, plate, objects
- ├─ Manipulator            (control.py)  inherits PandaArm (base.py)
- ├─ Perception             (perception.py)
- │    ├─ RGBDSensor        (base.py)
- │    ├─ ObjectDetector    (YOLO weights/best.pt)
- │    └─ DepthProcessor
- ├─ Planner                (planning.py)
- │    └─ its own Perception  (only used for get_object_pick_pose / get_obj_place_pose)
- └─ DepthProcessor         (used by main for steps 1.3–1.5)
-```
+Keep local test objects on the tabletop, separated, and within the arm's reach. The older notes suggest x around 0.3 to 0.7 m, y around -0.4 to 0.4 m, and roughly 8 cm between fruit positions as a practical starting point. These are test-placement suggestions, not a guarantee that every arrangement in that area will work. Touching fruits can merge into one cluster.
 
-**What each step hands to the next (data types):**
-| Between | Type |
+For a fewer-fruit test, remove one fruit entry while keeping valid JSON. Do not create duplicate instances of a class: the current dictionary and planner are not designed for that.
+
+### 2.8 Common problems
+
+| What happens | What to check or do |
 |---|---|
-| 1.1 → 1.2 | `list` of 14 lists, each with 7 joint angles (radians) |
-| 1.2 → 1.3 | `list` of 14 `open3d.geometry.PointCloud`, already in world frame |
-| 1.3 → 1.4 | one `PointCloud` (~190k points) |
-| 1.4 → 1.5 | one `PointCloud` (~8.5–9.5k points, only objects) |
-| 1.5 → 1.6 | `list` of `PointCloud`, one per cluster (8 in default scene) |
-| 1.6 → 2.1 | `dict` `{'lemon': PointCloud, 'plate': PointCloud, ...}` |
-| 2.1 → 2.2 | `list` of `(function_name, [args])`, e.g. `("pick_object_from", [[x,y,z], [π,0,0]])` |
+| `init_state.json`, assets, or weights cannot be found | Start the program from `A4/src`. |
+| A package import fails | Check that the terminal is using the environment where the packages were installed. |
+| The wrong Python starts | Run `python -c "import sys; print(sys.executable)"`, or use the full path to the correct interpreter. |
+| Windows batch file cannot find Python | Check whether the micromamba path expected by `run_demo.bat` exists. Use the correct interpreter manually if it differs. |
+| The arm pauses during processing | Read the terminal. ICP, plane removal, clustering, or model loading may still be working. |
+| The program waits with an Open3D window open | Close that window to continue. |
+| A movement times out | The code requests a hold at the current angles and stops the task. Inspect the target and possible obstruction before rerunning. |
+| A target exceeds joint limits | The movement is rejected before motor commands are sent. Investigate the target rather than removing the check. |
+| `Plate not found, cannot make a plan` | The plate was not identified. The planner returns an empty plan instead of inventing a destination. |
+| A cluster has no matching detection | That cluster is left unlabelled. Its points may belong to background structure, or the detector may have missed the object. |
 
-## 4. control.py: Manipulator (robot motion)
+Use `Ctrl+C` in the terminal to interrupt a run, then close any remaining display windows. Before a live demo, plug in the laptop and close demanding applications so processing and simulation have enough resources.
 
-* **`get_joint_positions()`** (helper I added): reads the 7 joint angles with `p.getJointStates`. This is
-  the robot's own state, so it is allowed.
-* **`is_moving()`**: True if any joint velocity is above 0.01 rad/s.
-* **`move_joints(target)`**: sends a position-control command to each of the 7 joints with
-  `setJointMotorControl2` (force 200, **maxVelocity 0.8 rad/s**), then waits in a loop until every joint
-  error is < 0.01 rad and the robot has stopped (10 s timeout).
-  *Why maxVelocity?* Without it the arm swung so fast that the grasped 1 kg fruit was thrown away
-  (we observed this in testing: the lemon landed back on the table). Slower motion fixed it.
-* **`move_home()`**: `move_joints(PANDA_HOME_POSITION)`.
-* **`move_in_task_space(position, orientation)`**: Cartesian target → joints using **inverse kinematics**
-  (`p.calculateInverseKinematics` on link 11 = the grasp point between the fingers). Euler angles are
-  converted to a quaternion first. Joint limits and the home pose as "rest pose" keep the solution
-  close to a natural arm shape. Only the first 7 values are used (the others are the fingers).
-  Default orientation `[π, 0, 0]` means the gripper points **straight down**.
-* **`command_gripper(open)`**: both finger joints (9, 10) go to 0.04 m (open) or 0 (closed) with
-  force 300, then wait 1 s. When closing on a fruit the fingers stop at the fruit's width (~0.02 each).
-* **`pick_object_from(location, orientation)`**: the **crane grasp**: open → go 20 cm above → 5 cm
-  above → down to the grasp point → close → lift 25 cm. Coming straight down from above avoids
-  knocking neighbouring objects sideways.
-* **`place_object_at(location, orientation)`**: go 15 cm above the target → go down → open → go up.
-* **`execute_task_plan(plan)`**: each step is `(function_name, args)`. `getattr(self, name)(*args)`
-  calls the function, so the plan is plain data and the robot just executes it.
+## 3. Where the code is and how data moves through it
 
-## 5. perception.py
+### 3.1 File responsibilities
 
-The subsections below follow the pipeline steps. Section 3.1 lists the order in the file.
+| File | Responsibility |
+|---|---|
+| `main.py` | Calls the stages in order. It is the supplied entry point. |
+| `base.py` | Supplies the environment, robot constants, finger constraint, and camera helper. |
+| `control.py` | Defines `Manipulator`: joint motion, gripper commands, picking, placing, and plan execution. |
+| `perception.py` | Defines image detection, camera exploration, point-cloud processing, object identification, and pose estimates. |
+| `planning.py` | Builds the action list from the perceived objects. |
 
-### ObjectDetector.detect_objects(rgb)
-1. RGB → BGR with `cv2.cvtColor` (OpenCV/YOLO expects BGR; the assignment asks for this explicitly).
-2. Run YOLOv8 (`weights/best.pt`). Classes: `plateId, orangeId, plumId, lemonId, peachId, wood_blockId`.
-3. Return a list of `(label, [x1,y1,x2,y2], confidence)` plus an annotated image.
+The assignment implementation files are `control.py`, `perception.py`, and `planning.py`. The notes are study material, not an extra runtime dependency. Follow the handout's separate requirements for the report and submission package.
 
-### generate_exploration_poses()
-Start from the home pose and change only:
-* **joint 0 (base yaw)**: 7 values from −90° to +90° (a 180° sweep, as the assignment suggests), so the
-  camera looks at the left, centre and right of the table.
-* **joint 5 (wrist pitch)**: 1.49 (home: camera looks at the table near the robot) and 1.85 (camera
-  tilted to look further out).
+### 3.2 Pipeline and data types
 
-7 × 2 = **14 poses**. More poses give more coverage but take more time. Changing pitch shows objects
-from different angles, so the back sides of fruits are also seen. I picked these by saving camera images
-from candidate poses and checking that all objects were visible.
-
-### exlpore_scene(poses)
-For each pose: `move_joints` → `sensor.get_observation()` (returns `rgb, depth, T_cb, intrinsics`) →
-`rgbd_to_pointcloud` → `transform_pointcloud(pcd, T_cb)`. Returns the list of world-frame clouds.
-
-### DepthProcessor.rgbd_to_pointcloud(rgb, depth, intrinsics)
-Pinhole camera model, applied to every pixel (u = column, v = row):
+```text
+generate_exploration_poses
+  -> exlpore_scene
+  -> register_pointclouds
+  -> remove_planes
+  -> cluster_objects
+  -> identify_objects
+  -> get_clear_task_plan
+  -> execute_task_plan
 ```
-Z = depth
-X = (u − cx) · Z / fx
-Y = (v − cy) · Z / fy
-```
-Done with `np.meshgrid` for all 640×480 pixels at once (no slow for-loop). Points farther than 1.5 m
-(background) are dropped. Colours are RGB/255 because Open3D wants values in 0–1.
-Intrinsics here: fx ≈ 457, fy ≈ 343, cx = 320, cy = 240. fx ≠ fy because the sensor renders a 640×480
-image with aspect = 1.
 
-### transform_pointcloud(pcd, T)
-`T_cb` is the 4×4 homogeneous transform of the **camera frame w.r.t. the robot base (world) frame**.
-`p_world = R · p_cam + t`, done by `pcd.transform(T)`. After this, all 14 clouds share one frame and
-can be combined. The robot base is at the origin, so base frame = world frame.
-
-### register_pointclouds(pcds)
-* Since we already know the camera pose, all clouds are *almost* aligned. **ICP (Iterative Closest
-  Point)** fixes small leftover errors.
-* ICP repeats two steps: (1) for each source point, find the closest target point (within
-  `max_correspondence_distance` = 2 cm); (2) compute the rotation and translation that minimise the
-  squared distance between these pairs (point-to-point, solved with SVD). This continues until it converges.
-* Starts from the identity (`init = np.eye(4)`) because the clouds are already in the world frame.
-* Each new cloud is aligned to the growing merged cloud, added, then **voxel-downsampled** (5 mm), so the
-  size stays manageable (14 × 307k points → ~190k).
-* The log prints **fitness** (fraction of points that found a partner) and **RMSE** (≈2–4 mm, so views
-  were already well aligned).
-
-### remove_plane / remove_planes
-* **RANSAC** for a plane: pick 3 random points → plane `ax+by+cz+d=0` → count points within
-  `distance_threshold` = 1 cm (inliers). Repeat 1000 times and keep the plane with the most inliers.
-  It is robust because outliers (objects) never get to vote for a "wrong" plane.
-* `remove_planes` loops up to 3 times. A found plane is removed **only if** it is horizontal
-  (|c| > 0.99, normal points up) **and** big (> 10 000 points). In the default scene it removes the
-  floor (z = −0.58) and then the table top (z = 0.045).
-* Finally, everything below table height + 1 cm is cropped (table edges and legs are not objects).
-* *Problem faced:* first I used |c| > 0.9 and "15 % of points". RANSAC then found a **tilted plane**
-  through the tops of fruits and the shelf and deleted the fruits. Making the test strict fixed it.
-
-### cluster_objects(scene_pcd)
-* **DBSCAN** with `eps = 0.02` (2 cm neighbour radius) and `min_points = 20`.
-  * Core point: ≥ min_points neighbours within eps. Border point: near a core point but not core itself.
-    Noise: neither (label −1).
-  * A cluster grows from a core point through all reachable core points and their neighbours.
-  * You **do not need to give the number of clusters** (unlike K-means), and clusters can have any shape.
-* Clusters with < 100 points are dropped (noise), and so is anything within 20 cm of the robot base in xy
-  (points on the robot itself).
-* Default scene gives 8 clusters: 4 fruits, wood block, plate + shelf top, and 2 shelf legs.
-  eps = 2 cm is small enough to keep fruits that are about 4–5 cm apart separate.
-
-### identify_objects(clusters)
-For each cluster:
-1. `get_cluster_top_position`: centre of the bounding box, 30 cm above its top. x is shifted by −4 cm
-   because the camera is mounted 4 cm in front of the end effector (see `base.py`).
-2. `move_in_task_space` there (gripper/camera facing down) and take an image.
-3. Run YOLO.
-4. **Project the cluster centre into the image** with `project_world_to_image`, then choose the box
-   that contains that pixel (or the nearest box) with the helper `find_closest_box_label`. This
-   matters because one image can show several fruits.
-5. Store `objs[name] = cluster`. If a label appears twice (e.g. a shelf leg seen as "plate"), keep the
-   **bigger** cluster, since each object type appears only once.
-6. Go back home before the next cluster (avoids hitting things).
-
-The image with YOLO boxes and a blue dot (the projected centre) is saved as `outputs/cluster_i.png`.
-
-### find_closest_box_label(u, v, detections) (helper for identify_objects)
-For each YOLO box: distance = distance from pixel (u, v) to the box centre. If (u, v) is **inside**
-the box, the distance is multiplied by 0.1, so a box that contains the point almost always wins. It
-returns the label with the smallest distance, or `None` if YOLO found nothing (then the cluster is ignored).
-*Why not just "inside the box"?* The projected centre can land slightly outside a tight box (camera
-offset, partial view), so the nearest box is a fallback.
-*Why a separate function?* So `identify_objects` reads as 4 clear steps (look → detect → match → store).
-
-### project_world_to_image(point, intrinsics, T_cb)
-The reverse of the point-cloud formula: `p_cam = inv(T_cb) · p_world`, then
-`u = fx·X/Z + cx`, `v = fy·Y/Z + cy`.
-
-### get_object_pick_pose / get_obj_place_pose
-* **Pick:** x, y = centroid of the cluster; z = **top of object − 3 cm**, so the fingers close around
-  the upper middle of the fruit. Orientation `[π,0,0]` (top-down crane grasp).
-* **Place:** x, y = centroid of the plate cluster; z = top of plate + 8 cm, so the fruit is released just
-  above the plate without the fingers touching it.
-
-## 6. planning.py: Planner
-
-* `get_clear_task_plan(objs)`: find the plate label, make the list of fruits (everything that is not
-  plate or wood_block), and add a pick-and-place plan for each fruit. Each fruit gets a small offset
-  (±4 cm) on the plate so fruits do not land on top of each other.
-* `pick_place_object_plan(obj, target, objs, offset)`: returns
-  `[pick_object_from, move_home, place_object_at, move_home]` with poses taken from perception.
-* The plan is **just a list of (function name, arguments)**. Planning (deciding what to do) is kept
-  separate from control (how to move), which makes it easy to print, check, and debug.
-
-## 7. Coordinate frames (common viva topic)
-
-* **World / base frame:** robot base at the origin, z up. The table top is at z ≈ 0.045.
-* **Camera frame (OpenCV convention):** x right, y down, z forward (along the view direction).
-  `base.py` builds `T_cb` from PyBullet's view matrix (OpenGL convention: y up, z backwards) and
-  multiplies by `diag(1,−1,−1,1)` to flip to the OpenCV convention.
-* **Image:** u = column (0–639), v = row (0–479).
-* **Chain:** pixel + depth → camera frame 3D (intrinsics) → world 3D (extrinsics `T_cb`).
-
-## 8. Problems faced and fixes (good to mention as "insights")
-
-1. **The arm threw the fruit while moving home:** the joints moved too fast. Fixed with
-   `maxVelocity=0.8` in `move_joints`.
-2. **RANSAC removed the fruits:** a tilted plane through the object tops was accepted. Fixed with a
-   strict horizontal check (|c| > 0.99) and a minimum plane size.
-3. **The shelf splits into several clusters** (thin legs): the legs also get the "plate" label. Fixed by
-   keeping only the biggest cluster for each label.
-4. **Several fruits in one image:** solved by projecting the cluster centre into the image and matching
-   it to the right bounding box.
-5. **Fruits stacking on the plate:** a different small offset for each fruit.
-6. (Setup) The conda MKL build of numpy crashed on Windows, so I switched to OpenBLAS. This is not part of
-   the code.
-
-## 9. Likely viva questions and short answers
-
-**Q: Why can't we use `getBasePositionAndOrientation`?**
-It gives ground-truth object poses, which a real robot never has. We must estimate everything from the
-camera, as in the real world.
-
-**Q: What is eye-in-hand?**
-The camera is mounted on the robot's hand, so it moves with the arm. We can choose viewpoints, but the
-camera pose changes, so every image needs its own `T_cb`.
-
-**Q: Why multiple viewpoints?**
-One view sees only the front surfaces and part of the table (occlusion, limited field of view). Combining
-views gives a more complete 3D model.
-
-**Q: If you already know the camera pose, why ICP?**
-Real poses have small errors (joint encoder noise, calibration). ICP refines the alignment. In our
-simulation the clouds were already close (RMSE ~3 mm), so ICP makes only small corrections.
-
-**Q: What does ICP need to work?**
-A good initial guess (the clouds must already be roughly aligned) and enough overlap. Otherwise it can
-converge to a wrong local minimum.
-
-**Q: Point-to-point vs point-to-plane ICP?**
-Point-to-point minimises distances between matched points. Point-to-plane minimises the distance
-along the target's surface normal and usually converges faster on flat surfaces, but needs normals. I
-used point-to-point because it is simpler.
-
-**Q: Why voxel downsampling?**
-14 × 307k points is too many. A 5 mm voxel grid keeps one averaged point per cube, which removes
-duplicate points from overlapping views and makes RANSAC, DBSCAN and ICP much faster.
-
-**Q: Explain RANSAC. Why not least squares?**
-Least squares on all points would be pulled by the objects (outliers). RANSAC fits a plane to random
-minimal samples (3 points) and keeps the plane with the most inliers, so outliers are ignored.
-
-**Q: RANSAC parameters?**
-`distance_threshold = 0.01`: how close a point must be to count as on the plane (1 cm, larger than the
-noise but smaller than the fruits). `ransac_n = 3`: points needed to define a plane.
-`num_iterations = 1000`: number of trials; more trials give a higher chance of finding the best plane.
-
-**Q: Why DBSCAN and not K-means?**
-K-means needs the number of clusters in advance (unknown) and gives round clusters. DBSCAN finds the
-number automatically, handles any shape, and labels isolated points as noise.
-
-**Q: What happens if eps is too big or too small?**
-Too big: nearby fruits merge into one cluster. Too small: one object breaks into many pieces or becomes
-noise. 2 cm is about 4 voxel sizes and smaller than the gaps between fruits.
-
-**Q: How do you match a YOLO box to a 3D cluster?**
-Project the cluster's 3D centre into the image with the intrinsics and the inverse camera pose, then pick
-the box containing that pixel.
-
-**Q: Why convert RGB to BGR?**
-OpenCV and Ultralytics treat a numpy image as BGR. The sensor gives RGB, so without converting, red and
-blue are swapped and detection gets worse (an orange would look blue).
-
-**Q: What is inverse kinematics?**
-Given a desired end-effector pose, find joint angles that achieve it. PyBullet solves it numerically
-(iterative, damped least squares using the Jacobian). Forward kinematics is the opposite: joints → pose.
-
-**Q: Why the crane grasp?**
-Approaching vertically from above is simple, needs no object orientation, and the fruits are roughly
-round. The fingers come down without pushing neighbouring objects.
-
-**Q: How did you decide the grasp height?**
-Top of the cluster − 3 cm, which is roughly the upper middle of a ~6 cm fruit. The fingers close on the
-widest part, and the fingertips stay above the table.
-
-**Q: How is your solution general and not hard-coded?**
-Nothing uses object positions from the JSON file. The exploration poses cover the whole table, and all
-positions come from the point cloud. The planner works for any number of fruits and any plate
-location. It was tested on 3 different scenes.
-
-**Q: What would fail / what could you improve?**
-* Fruits touching each other would merge into one DBSCAN cluster. One fix is to split it using YOLO boxes.
-* A fixed top-down grasp yaw. PCA on the cluster could give the long axis of the lemon to align the
-  fingers with.
-* No collision-aware path planning; it relies on going home between moves. A real planner (RRT)
-  would be better.
-* Fine-tune YOLO on more images (the assignment's optional part).
-* Close the loop: check after picking whether the object is really in the gripper (e.g., finger
-  width > 0), and retry if not.
-
-**Q: What does T_cb contain?**
-A 4×4 matrix: top-left 3×3 = rotation of the camera axes in the base frame, top-right 3×1 = camera
-position in the base frame, bottom row [0 0 0 1].
-
-**Q: How are depth values computed in base.py?**
-The PyBullet depth buffer is non-linear (0–1). `base.py` converts it to metric depth with
-`far·near / (far − (far − near)·d)`.
-
-## 10. More viva questions, grouped by type
-
-### 10.1 Codebase questions ("show me in the code")
-
-**Q: Walk me through what happens when I run main.py.**
-Follow the table in section 3 and the code map in 3.1. Open `main.py`, read the step comments, and for
-each step search `perception.py` / `planning.py` / `control.py` for `STEP x.y`.
-
-**Q: Which files did you write and which were given?**
-Given: `main.py`, `base.py`, assets, YOLO weights, `init_state.json`. Mine: the function bodies in
-`control.py`, `perception.py`, `planning.py`. The class and function names come from the template
-(that is why `exlpore_scene` is misspelled: `main.py` calls it with that name, so it cannot be renamed).
-
-**Q: Which functions did you add yourself (not in the template)?**
-`get_joint_positions` (control.py), `find_closest_box_label` (perception.py), and the `offset`
-argument of `pick_place_object_plan` (planning.py). Everything else fills in a template function.
-
-**Q: Why does `Manipulator` inherit from `PandaArm`?**
-`PandaArm` (base.py) holds the robot constants: joint indices, joint limits, home pose, finger
-open/closed values, end-effector index 11. It also creates the finger gear constraint. Inheriting gives
-`Manipulator` all of these as `self.JOINT_LOWER_LIMITS` and so on without copying them.
-
-**Q: How does `execute_task_plan` know which function to call?**
-Each plan step is `("pick_object_from", [pos, orn])`. `getattr(self, "pick_object_from")` returns
-the method, and `function(*args)` calls it with the arguments. With a wrong name, Python raises
-`AttributeError`.
-
-**Q: Why is the plan a list of names and not direct function calls?**
-It separates *deciding* (Planner) from *doing* (Manipulator). The plan can be printed and checked
-before the robot moves, and the planner never touches PyBullet.
-
-**Q: Why does `Planner` create its own `Perception`?**
-The template's `Planner.__init__` does it. The planner only uses its `get_object_pick_pose` /
-`get_obj_place_pose`. Side effect: YOLO is loaded a second time (a few seconds of extra start-up). It
-would be cleaner to pass in the existing `Perception`, but the template constructor was kept.
-
-**Q: Why are both `Perception` and `DepthProcessor` there?**
-`Perception` moves the robot and uses the camera and YOLO. `DepthProcessor` only does point-cloud maths
-(no robot), so it is reusable and testable on its own. See 3.1.
-
-**Q: What are `VISUALIZE` and `OUTPUT_FOLDER` at the top of perception.py?**
-`VISUALIZE = True` opens an Open3D window after steps 1.2–1.5 (for demos and debugging).
-`OUTPUT_FOLDER = "./outputs"` is where `identify_objects` saves the YOLO images. Neither changes what
-the robot does.
-
-**Q: Where are all the tuning numbers?**
-
-| Number | Where | Meaning |
+| Step | Function | Output passed onward |
 |---|---|---|
-| 7 yaws × 2 wrist tilts (1.49, 1.85) | `generate_exploration_poses` | 14 viewpoints |
-| 1.5 m | `rgbd_to_pointcloud` | drop background points |
-| 0.005 | `DepthProcessor.__init__` | 5 mm voxel size |
-| 0.02 | `register_pointclouds` | ICP max correspondence distance |
-| 0.01 / 3 / 1000 | `remove_plane` | RANSAC threshold / sample size / iterations |
-| 0.99, 10000 | `remove_planes` | "horizontal" and "big" plane checks |
-| +0.01 | `remove_planes` | crop everything up to 1 cm above the table |
-| eps 0.02, min_points 20 | `cluster_objects` | DBSCAN |
-| 100 points, 0.2 m | `cluster_objects` | drop noise / robot points |
-| +0.30, −0.04 | `get_cluster_top_position` | camera 30 cm above object, 4 cm camera offset |
-| ×0.1 | `find_closest_box_label` | preference for a box that contains the point |
-| −0.03 / +0.08 | pick / place pose | grasp below the top / release above the plate |
-| ±0.04 | `get_clear_task_plan` | spread fruits on the plate |
-| 0.20 / 0.05 / 0.25, 0.15 | pick / place sequence | approach and lift heights |
-| maxVelocity 0.8, force 200 / 300 | `move_joints` / `command_gripper` | slow arm, strong grip |
-| 0.01 rad, 10 s | `move_joints` | "arrived" tolerance and timeout |
+| 1.1 | `generate_exploration_poses` | A list of joint configurations, each containing seven angles. |
+| 1.2 | `exlpore_scene` | A list of coloured Open3D point clouds, already in world coordinates. |
+| 1.3 | `register_pointclouds` | One combined point cloud. |
+| 1.4 | `remove_planes` | The remaining points after removing accepted large planes and cropping below the table. |
+| 1.5 | `cluster_objects` | A list of point clouds, one per retained cluster. |
+| 1.6 | `identify_objects` | A dictionary such as `{'lemon': lemon_cloud, 'plate': plate_cloud}`. |
+| 2.1 | `get_clear_task_plan` | A list of action names and their arguments. |
+| 2.2 | `execute_task_plan` | Executes the actions; an error stops later actions. |
 
-### 10.2 Simulation questions (PyBullet)
+The spelling `exlpore_scene` comes from the starter code. Keep it because `main.py` calls that exact name.
 
-**Q: How does time work in this simulation?**
-`base.py` calls `p.setRealTimeSimulation(1)`, so PyBullet steps the physics by itself in real time. Our
-code never calls `stepSimulation`. It sends a motor target, then **waits** (`time.sleep` loop in
-`move_joints`, 1 s sleep in `command_gripper`) until the robot gets there.
+In the recent default-scene test, combining views produced 193,130 points. After plane removal, 9,409 remained, and clustering returned 8 groups. Point counts vary with the scene and the reconstruction; they are examples, not targets the code must force.
 
-**Q: What does `POSITION_CONTROL` mean?**
-PyBullet runs a motor controller (PD-like) per joint that drives it to `targetPosition`. `force` is
-the maximum torque/force the motor may use, and `maxVelocity` caps its speed.
+### 3.3 The classes and their relationships
 
-**Q: How do the two fingers move together?**
-`PandaArm.create_finger_constraint` (base.py) adds a `JOINT_GEAR` constraint between finger joints 9
-and 10 with `gearRatio = -1`, so they move symmetrically (one opens as the other opens).
+```text
+main.py
+  Environment               loads the simulated scene
+  Manipulator(PandaArm)      controls the robot
+  Perception                observes and identifies objects
+    RGBDSensor              supplies colour, depth, and camera settings
+    DepthProcessor          works with 3D points
+    ObjectDetector          loads YOLO only when identification needs it
+  Planner
+    its own Perception      used for pick and place pose calculations
+  DepthProcessor            used directly for merging, plane removal, clustering
+```
 
-**Q: What is link 11?**
-`panda_grasptarget`: a virtual point between the fingertips. Doing IK for this link means "put the
-**middle of the fingers** at the target", which is exactly where the fruit should be.
+`Perception` handles observations and robot viewpoints. `DepthProcessor` handles point-cloud calculations and does not move the arm. This makes their responsibilities easy to explain separately.
 
-**Q: How does the robot hold the fruit? Is it attached?**
-No constraint is created. The fruit is held only by **contact and friction** between fingers and
-fruit (the fruit URDFs have mass 1 kg and friction 0.5). That is why moving too fast threw the fruit (section 8).
+The planner still owns a separate `Perception` object because of the starter structure. That object does not load another YOLO model: `Perception.__init__` sets `obj_detector` to `None`, and `identify_objects` loads it only when there are clusters to identify.
 
-**Q: What camera is simulated?**
-`RGBDSensor` in `base.py`: 640×480, 70° field of view, near 0.047 m, far 2 m, rendered with
-PyBullet's TinyRenderer from a point 4 cm in front of / 2 cm below the hand, looking along the hand's
-z-axis. The depth buffer is converted to metres (see section 9).
+The functions inside each class are mostly arranged in the order they are used. The `STEP` labels on the main pipeline functions connect them to `main.py`. Helpers have plain descriptions rather than all repeating a step number. Search for the function name when locating an individual helper.
 
-**Q: Why does a run take ~5 minutes?**
-Real-time physics, a slow arm (`maxVelocity 0.8`), 14 exploration poses, a visit above each of the 8
-clusters, and going home between every pick and place.
+## 4. How the robot moves: `control.py`
 
-**Q: What is different from a real robot? (sim-to-real gap)**
-Simulated depth is perfect: no noise, no holes on shiny or dark surfaces, perfect calibration (exact
-`T_cb`). Real joints have backlash and real grasps slip. On a real robot ICP and outlier removal matter
-more, and the camera must be calibrated (intrinsics + hand-eye calibration).
+### 4.1 Reading the robot's own state
 
-**Q: How do you know objects are on the plate without ground truth?**
-The submitted code does not check this. For testing only, a separate script read the true positions
-**after** the task (section 2). A real robot could check by looking again with the camera.
+`Manipulator` inherits from `PandaArm`. This gives it the supplied joint numbers, joint limits, home configuration, finger positions, and end-effector index. The base constructor also creates the gear constraint that makes the fingers move together.
 
-### 10.3 Conceptual questions
+`get_joint_positions()` reads the angles of the seven arm joints using `getJointStates`. Reading the robot's own state is allowed. This does not reveal where scene objects are.
 
-**Q: Intrinsics vs extrinsics?**
-Intrinsics (`fx, fy, cx, cy`) describe the camera itself: pixel ↔ ray. Extrinsics (`T_cb`) describe
-where the camera is: camera frame ↔ base frame. You need both to go from a pixel and its depth to a
-world point.
+`is_moving()` reads joint velocities. It returns `True` if any arm joint is moving faster than 0.01 radians per second. This helps avoid taking a picture while the arm is still settling.
 
-**Q: Why 4×4 matrices (homogeneous coordinates)?**
-A 4×4 matrix does rotation **and** translation in one multiplication (`[x y z 1]`), and transforms can
-be chained by multiplying matrices (`T_ab · T_bc = T_ac`). Inverse: `inv(T_cb)` takes world → camera
-(used in `project_world_to_image`).
+### 4.2 Moving to joint angles
 
-**Q: What overall architecture is this?**
-**Sense → Plan → Act**: perceive the whole scene once (Part I), make the full plan (2.1), then execute
-it (2.2). It is **open-loop** during execution: the robot does not look again while picking. That is
-fine in simulation, but a real system would re-check (closed loop).
+`move_joints(target_joints)` receives seven angles in radians.
 
-**Q: How does YOLO work (briefly)?**
-A one-stage detector: one CNN pass predicts boxes, class scores and confidences for the whole image.
-Overlapping duplicate boxes are removed with Non-Maximum Suppression (NMS). We used weights
-(`best.pt`) already trained on these 6 object classes.
+Before moving, it checks that the input contains exactly seven valid numbers and that every angle is within the Panda's joint limits. If a target is invalid, it raises a `ValueError` before sending any motor commands.
 
-**Q: Why combine 3D clustering with 2D detection instead of using only one?**
-YOLO says **what** an object is but only in 2D (no depth/position). The clusters give **where** it is
-in 3D but not what it is. Projecting the cluster into the image links the two.
+For a valid target, it sends a position-control command to each arm joint. Position control means the motor controller tries to bring the joint to the requested angle. The arm uses a maximum motor torque of 200 and a maximum joint speed of 0.8 radians per second.
 
-**Q: Why not just use the depth inside the YOLO box to find the object?**
-The box also contains table and background pixels, so its depth is mixed. The cluster contains only
-the object's points, which gives a clean centroid and top height.
+The function then waits until:
+
+- The largest difference between a current and requested angle is below 0.01 radians.
+- `is_moving()` says the arm has settled.
+
+It checks roughly every 0.01 seconds and waits for at most 10 seconds. It uses `time.monotonic`, a clock that is not affected by adjustments to the computer's calendar clock.
+
+If the time limit is reached, the function replaces the old motor targets with the current joint angles, asking the arm to hold there. It then raises a `TimeoutError`. The error stops later actions instead of letting the gripper close or release at an unintended position.
+
+The speed limit helps reduce sudden motion and slipping.
+
+### 4.3 Home position and hand targets
+
+`move_home()` calls `move_joints` with the supplied `PANDA_HOME_POSITION`.
+
+`move_in_task_space(target_position, target_orientation)` describes a target for the hand rather than seven joint angles:
+
+```python
+position = [x, y, z]              # metres, relative to the robot base
+orientation = [roll, pitch, yaw] # radians
+```
+
+If no orientation is supplied, the default is `[pi, 0, 0]`, which points the gripper downward in this setup.
+
+The function converts the Euler angles into a quaternion, the four-number rotation format expected by the simulator API. It then calls `calculateInverseKinematics` to find joint angles for the requested hand pose. This is inverse kinematics, or IK: position and orientation go in, joint angles come out.
+
+The IK call supplies the joint limits, the allowed angle ranges, and the home configuration as a preferred resting shape. It allows up to 200 iterations with a residual threshold of `1e-4`. Only the first seven returned angles are sent to the arm; the remaining movable joints are the fingers.
+
+The target link is index 11, `panda_grasptarget`, a reference point between the fingertips. This lets the target describe where the object should sit between the fingers.
+
+IK and the subsequent joint checks do not plan a path around obstacles. Also, the control code checks whether the requested joint angles were reached; it does not separately measure and validate the final hand-position error after every IK move.
+
+### 4.4 Opening and closing the gripper
+
+`command_gripper(open=True)` sends each finger to 0.04 m. `open=False` sends each finger toward 0 m. The fingers are joints 9 and 10, and the command uses a maximum force of 300, followed by a one-second wait.
+
+When closing around an object, physical contact may stop the fingers before zero. The function returns `True` to indicate that the command was sent. It does not verify a successful grasp.
+
+The robot holds fruit through contact and friction. No attachment constraint is added between a fruit and the hand. The gear constraint only links the two fingers. The supplied fruit models have a mass of 1 kg each; their loaded lateral-friction value was checked as 0.5. These are simulation properties, not claims about real fruit.
+
+### 4.5 Picking and placing
+
+`pick_object_from(position, orientation)` performs a crane grasp, meaning an approach from above:
+
+1. Open the fingers.
+2. Move 20 cm above the estimated grasp position.
+3. Move to 5 cm above it.
+4. Move down to the grasp position.
+5. Close the fingers.
+6. Lift 25 cm above the grasp position.
+
+`place_object_at(position, orientation)` moves 15 cm above the release position, lowers to it, opens the fingers, and rises 15 cm again.
+
+These are hand waypoints. The controller sends joint targets for each one, without enforcing a straight line through space between them. Section 8 explains the movement limits.
+
+### 4.6 Executing a plan
+
+Each plan step contains a method name and the arguments for that method:
+
+```python
+("pick_object_from", [pick_position, pick_orientation])
+```
+
+`execute_task_plan` gets the method with `getattr(self, action)` and calls it with `function(*args)`. The `*` passes the list elements as separate function arguments.
+
+This keeps the plan as ordinary Python data that can be printed and inspected before execution. The executor runs steps in order. A raised movement error prevents later steps from running. An empty plan prints `No actions to perform`.
+
+## 5. How the scene is understood: `perception.py`
+
+### 5.1 Generate exploration poses
+
+`generate_exploration_poses()` starts with the home configuration and changes two joints:
+
+- Base joint 0 takes seven angles from -90 to +90 degrees.
+- Wrist joint 5 takes two angles, 1.49 and 1.85 radians.
+
+The seven base angles are combined with both wrist angles, giving 14 viewpoints. Turning the base changes the viewing direction across the table; changing the wrist tilt gives a different view of the scene.
+
+This is a fixed scan pattern rather than a view-selection algorithm. The earlier notes say camera images were inspected when choosing the poses. The pattern covered the needed objects in the three tested scenes.
+
+The generated poses passed the joint-limit checks in those runs. The exploration loop can accept a different-length list of poses; it does not require the list to contain exactly 14.
+
+### 5.2 Capture observations and build point clouds
+
+`exlpore_scene(poses)` moves to each configuration and reads:
+
+```python
+rgb, depth, T_cb, intrinsics = sensor.get_observation(p, pandaId)
+```
+
+The sensor returns:
+
+| Value | Meaning |
+|---|---|
+| `rgb` | A 480 by 640 colour image with RGB channel order. |
+| `depth` | A 480 by 640 array of depth values in metres. |
+| `T_cb` | The camera-to-base position and rotation, stored in a 4 by 4 matrix. |
+| `intrinsics` | `[fx, fy, cx, cy]`, the camera's focal lengths and image centre in pixels. |
+
+For each view, the code converts pixels into 3D points in camera coordinates, transforms those points into world coordinates, and stores the cloud. It returns home after the scan.
+
+`rgbd_to_pointcloud` applies the pinhole-camera equations. Section 7 works through the equations and coordinate frames. It also copies the RGB colours to the points and divides colour values by 255, converting the usual 0 to 255 range into Open3D's 0 to 1 range.
+
+The depth filter keeps only finite points with depth greater than zero and less than 1.5 m. It removes missing or invalid readings and distant background points. The 1.5 m cutoff is a processing choice; the sensor itself has a far range of 2 m.
+
+`transform_pointcloud` copies the cloud before applying `T_cb`. This preserves the original camera-frame cloud and gives the result a common reference frame for merging.
+
+### 5.3 Combine views with ICP
+
+`register_pointclouds(pcds)` ignores empty clouds. If no usable clouds remain, it returns an empty Open3D cloud and prints a clear message.
+
+All input clouds have already been transformed into world coordinates using the known camera pose. ICP, short for Iterative Closest Point, refines their alignment:
+
+1. Find nearby matching points between the next view and the combined cloud.
+2. Estimate a small rotation and translation that bring those matches closer.
+3. Repeat until the library's stopping condition is reached.
+
+Point-to-point ICP reduces the sum of squared distances between matching points. Matches must be within 2 cm. It starts from `np.eye(4)`, the identity matrix, which leaves points where they are: the camera transforms have already given an initial alignment.
+
+Each new view is aligned to the growing combined cloud, added to it, and downsampled again. Downsampling uses a 5 mm voxel grid: imagine dividing space into small cubes and replacing points in each occupied cube with a representative averaged point.
+
+A full 640 by 480 image has 307,200 pixels. Fourteen full views could produce over four million points before filtering. Downsampling reduces repeated nearby samples and makes later processing practical.
+
+The terminal reports:
+
+- Fitness: the fraction of source points that found a nearby match.
+- RMSE: the root mean square distance between matched points, in metres. Smaller values mean those matches are closer.
+
+In the recent default run, reported RMSE values were about 1.1 to 3.8 mm. A low RMSE is not proof that the entire cloud is correct: poorly overlapping views or repeated shapes can still produce a misleading alignment.
+
+### 5.4 Remove large flat surfaces with RANSAC
+
+`remove_plane` uses Open3D's `segment_plane`. Its plane equation is:
+
+```text
+a*x + b*y + c*z + d = 0
+```
+
+RANSAC repeatedly fits a possible plane from three sampled points and counts points close to it. Points within the distance threshold are called inliers. Points outside that distance are outliers for that candidate plane.
+
+The code uses a distance threshold of 1 cm, a sample size of three points, and up to 1,000 iterations. The method looks for a plane supported by many points. Object points can still support an unwanted plane, so RANSAC alone does not know which surface is the table.
+
+`remove_planes` downsamples the scene, then tries up to three plane removals. It accepts a plane only when:
+
+- `abs(c) > 0.99`, meaning its normal is close to vertical, so the surface is close to horizontal.
+- It contains more than 10,000 points, distinguishing large surfaces from smaller object surfaces in this reconstruction.
+
+The function stops when a candidate fails those checks or fewer than three points remain. It treats the highest accepted plane as the tabletop and keeps points more than 1 cm above that height.
+
+In the recent default run, the two removed plane heights were approximately -0.579 m for the floor and 0.045 m for the table. Those values were estimated from the cloud; the assignment logic does not use them as hard-coded object coordinates.
+
+These thresholds are tuned for this scene scale and 5 mm downsampling. A poorly observed table or another large horizontal surface can challenge the assumptions.
+
+### 5.5 Group nearby points with DBSCAN
+
+`cluster_objects(scene_pcd)` returns an empty list for an empty cloud. Otherwise it uses DBSCAN, a method that forms groups based on how densely points are packed together.
+
+The settings are `eps=0.02`, a 2 cm neighbourhood radius, and `min_points=20`:
+
+- A core point has a neighbourhood containing at least 20 points.
+- A border point is close to a core point without having enough neighbours to be a core point itself.
+- Sparse points that do not belong to a cluster are noise, labelled `-1`.
+
+DBSCAN grows clusters through connected dense neighbourhoods. It does not need a chosen object count. The code iterates over labels starting at zero, so it leaves noise points out.
+
+After clustering, it drops groups with fewer than 100 points. It also drops clusters whose bounding-box centre is within 20 cm of the robot base in the horizontal plane. That second rule is intended to reject robot points; it would also reject a real scene object inside that region.
+
+DBSCAN can merge touching objects or split an object with sparse observations. Increasing the radius can join nearby objects; decreasing it can break one object into smaller groups. The 2 cm radius is four times the 5 mm voxel size.
+
+The tested default scene gave eight clusters: four fruits, the wooden block, a plate/shelf-top group, and two shelf-leg groups. A cluster is therefore an object proposal, not a guaranteed separate object.
+
+### 5.6 Identify clusters using the colour image
+
+`ObjectDetector.detect_objects(rgbImage)` converts RGB into BGR, the channel order expected for the NumPy image passed to this detector. It runs the supplied model at `./weights/best.pt`.
+
+Each returned detection is:
+
+```python
+(label, [x1, y1, x2, y2], confidence)
+```
+
+The box coordinates are left, top, right, and bottom in pixels. Confidence is the model's score for the detection. The detector also returns an image with boxes and labels drawn on it.
+
+The supplied classes are `plateId`, `orangeId`, `plumId`, `lemonId`, `peachId`, and `wood_blockId`. Removing `Id` gives the names used by the object dictionary and planner.
+
+`identify_objects(clusters)` performs the following steps for each cluster:
+
+1. Choose a viewpoint above it using `get_cluster_top_position`.
+2. Move the hand there and capture a fresh observation.
+3. Run YOLO on the colour image.
+4. Project the cluster's 3D bounding-box centre into that image.
+5. Find a suitable box and store the cluster under its label.
+6. Return home before the next visit.
+
+The hand target is 30 cm above the cluster's highest point, with x shifted by -4 cm to compensate for the sensor helper's offset. The camera is slightly below the hand.
+
+The code gets the box with `get_axis_aligned_bounding_box`. Its faces follow the x, y, and z axes. Its centre is halfway between its minimum and maximum bounds. That differs from the centroid, which averages all the points.
+
+If the cluster is behind the camera, its point cannot be projected. If the projected point is outside the image, it is not matched. Otherwise `find_closest_box_label` considers only boxes containing that point. When several boxes overlap, it chooses the box with the closest centre. The confidence score is returned by YOLO but is not used by this matching helper.
+
+No containing box means no label. There is no fallback to an unrelated nearby box and no distance multiplier of 0.1 in the current code.
+
+The result looks like this:
+
+```python
+objs = {
+    "lemon": lemon_point_cloud,
+    "plate": plate_point_cloud,
+}
+```
+
+If several clusters receive the same label, the larger one is retained. This is a heuristic for the one-object-per-type scene. It helps when parts of the shelf are also associated with a plate detection. A projected point can share a pixel with a visible surface in front of it, so box matching alone does not resolve every occlusion.
+
+This dictionary does not support two real lemons as separate instances. That would need a different representation and corresponding planner changes. Duplicate-instance support is outside the current agreed scope.
+
+### 5.7 Estimate pick and place poses
+
+`get_object_pick_pose(label, objs)` uses the labelled cluster:
+
+- x and y are the average coordinates of its points.
+- z is the highest point minus 3 cm, placing the grasp below the visible top.
+- Orientation is `[pi, 0, 0]`, pointing the gripper down.
+
+The reconstructed surfaces may be incomplete, so their centroid is an estimate, not necessarily the object's exact centre of mass. The 3 cm offset is a simple grasp-height choice for these fruit models, not a general rule for every object shape.
+
+`get_obj_place_pose(object_label, target_label, objs)` uses the plate cluster's average x and y coordinates. Its release height is the plate cluster's highest point plus 8 cm. The downward orientation stays the same.
+
+Both methods return `(position, orientation)`, with three values in each part. The planner then adds a small horizontal offset to the release position.
+
+## 6. How the task plan is built: `planning.py`
+
+`get_clear_task_plan(objs)` looks for the plate among the detected labels. If it cannot find one, it prints `Plate not found, cannot make a plan` and returns `[]`.
+
+It treats labels other than plate and wood block as fruits. With this model's six classes, those are lemon, orange, peach, and plum. Only labelled objects enter the plan; an undetected fruit cannot be included just because the task goal is to clear all fruits.
+
+The plan begins with a home move. For every fruit, `pick_place_object_plan` adds:
+
+```text
+pick_object_from -> move_home -> place_object_at -> move_home
+```
+
+For N detected fruits and a detected plate, this gives `1 + 4*N` actions: 17 for four fruits or 13 for three. If no plate is detected, the plan is empty instead.
+
+The release offsets, in metres, are:
+
+```python
+[(0.04, 0), (-0.04, 0), (0, 0.04), (0, -0.04), (0, 0)]
+```
+
+They spread releases around the perceived plate centre to reduce stacking. The offsets cycle if there are more entries. The code does not calculate packing based on plate size or check the plate again after each placement.
+
+Returning home between operations is a simple way to reduce risky transfers. It does not check every intermediate arm position for collisions. Planning here means choosing the action sequence and targets; it is not a full collision-aware motion planner.
+
+## 7. The camera maths and coordinate frames
+
+### 7.1 Why the frames matter
+
+A pixel location alone is not a robot target. We need its depth, the camera's settings, and the camera's position and rotation relative to the robot.
+
+The world/base frame has the robot base at its origin, with z pointing up. In this supplied scene, the robot-base and world frames coincide.
+
+The camera frame uses the OpenCV convention: x points right in the image, y points down, and z points forward along the viewing direction. Pixel `u` is the column and `v` is the row. The image has columns 0 to 639 and rows 0 to 479.
+
+The processing chain is:
+
+```text
+pixel + depth -> 3D camera point -> 3D world point
+```
+
+Intrinsics describe the camera's image geometry. Extrinsics describe where the camera is and how it is turned relative to another frame.
+
+### 7.2 From a pixel to a 3D camera point
+
+For pixel `(u, v)` with depth `Z`:
+
+```text
+X = (u - cx) * Z / fx
+Y = (v - cy) * Z / fy
+Z = depth
+```
+
+`cx` and `cy` describe the image centre. `fx` and `fy` describe focal length in pixel units. Subtracting the centre gives the pixel's displacement from the viewing axis; scaling by depth gives its 3D displacement.
+
+The code uses `np.meshgrid` to generate the pixel coordinates and applies these equations to the arrays together. It does not need a Python loop for every pixel.
+
+For example, if `u=cx` and `v=cy`, then `X=0` and `Y=0`. That pixel lies on the camera's forward axis.
+
+In the supplied helper, `fx` is about 457, `fy` about 343, and the image centre is `(320, 240)`. The focal lengths differ because the projection uses aspect 1 while the rendered image has size 640 by 480. Always use the returned intrinsics rather than substituting these example values.
+
+### 7.3 From camera coordinates to world coordinates
+
+`T_cb` is a 4 by 4 matrix that combines rotation and translation:
+
+```text
+T_cb = [ R  t ]
+       [ 0  1 ]
+```
+
+Here `R` is a 3 by 3 rotation matrix and `t` contains the three position coordinates. Written without the extra matrix row, the operation is:
+
+```text
+point_world = R * point_camera + t
+```
+
+A homogeneous point is `[X, Y, Z, 1]`. The extra `1` lets one matrix apply both rotation and translation. These matrices can also be multiplied to combine transformations between frames.
+
+The camera moves with the arm, so each captured image must use its own `T_cb`. Using one old camera pose for all views would put points in the wrong places.
+
+### 7.4 From a world point back to a pixel
+
+`project_world_to_image` reverses the process:
+
+```text
+point_camera = inverse(T_cb) * [x_world, y_world, z_world, 1]
+u = fx * X / Z + cx
+v = fy * Y / Z + cy
+```
+
+`inverse(T_cb)` is named `T_bc` in the code. It takes a base/world point into camera coordinates.
+
+The helper returns `None` if the coordinates are invalid or `Z <= 0`. A zero depth would cause division by zero; a negative depth is behind the camera. The caller separately checks that the resulting pixel lies inside the image.
+
+The dot drawn in a saved detection image is this projected cluster centre. That is how a 3D group is connected to a 2D object name.
+
+### 7.5 What the supplied sensor helper does
+
+`RGBDSensor` renders a 640 by 480 image with a 70-degree field of view, near distance 0.047 m, and far distance 2 m. It uses PyBullet's CPU-based TinyRenderer.
+
+The helper adds `[0.04, 0, -0.02]` to the hand position to locate the camera. In this implementation that offset is added in world coordinates; the viewing and up directions are calculated from the hand's rotation.
+
+The rendered depth buffer is not already a distance in metres. If its value is `d`, with near distance `N` and far distance `F`, the helper converts it using:
+
+```text
+Z = F * N / (F - (F - N) * d)
+```
+
+The helper also converts the OpenGL view convention into the OpenCV camera convention. It uses the axis-flip matrix `diag(1, -1, -1, 1)` when constructing `T_cb`.
+
+The assignment logic should use the returned observations and camera information. It should not call direct object-pose, segmentation-mask, or camera-rendering APIs to obtain privileged scene information.
+
+## 8. Fixes, assumptions, and possible improvements
+
+### 8.1 What the current safeguards do
+
+| Situation | Current behaviour |
+|---|---|
+| No usable scan clouds | Return an empty point cloud. |
+| Fewer than three points available for plane fitting | Stop the plane-removal loop. |
+| Empty cloud or only DBSCAN noise | Return no object clusters. |
+| No clusters to identify | Return an empty dictionary without loading YOLO. |
+| No detection box contains the projected point | Leave the cluster unlabelled. |
+| Projected point is behind the camera or outside the image | Do not use it to assign a label. |
+| Plate is missing from the labelled objects | Return an empty plan and explain why. |
+| Joint target has invalid values or exceeds limits | Reject it before motor commands are sent. |
+| Arm does not reach the target angles within 10 seconds | Request a hold at the current angles and raise an error, stopping later actions. |
+
+These checks help the program fail clearly. They do not make every perception result or movement correct.
+
+### 8.2 Earlier development observations
+
+The original notes recorded the following problems and design choices. They are useful background, but the earlier trial-and-error runs were not repeated during the latest Mac verification:
+
+- Fast arm movement reportedly threw a held fruit away. The joint-speed limit was reduced to 0.8 radians per second.
+- A looser plane test reportedly removed fruit points. The earlier settings used `abs(c) > 0.9` and a plane-size rule based on 15% of the cloud. The current code uses the stricter horizontal test and a 10,000-point minimum.
+- Parts of the shelf received the plate label. Keeping the larger cluster for a repeated label helped retain the plate/shelf-top group.
+- Several fruits appeared in the same image. Projecting a cluster centre made it possible to choose a corresponding detection rather than simply taking the first result.
+- Releasing every fruit at the same position caused stacking. The planner added small horizontal release offsets.
+- The earlier Windows setup reportedly had a NumPy MKL crash and was changed to an OpenBLAS build. That is setup history, not a change to the perception or control algorithms.
+
+The recent changes added explicit empty-input handling, stricter detection matching, movement-limit checks, timeout failures, and model loading only when needed. These behaviours were checked against the current code.
+
+### 8.3 Limits to explain honestly in the viva
+
+The system assumes one object per type and works best when fruits are separated. A hidden object can be missed, touching fruits can merge, and the detector can make mistakes. A list of detected labels does not prove that every real object was found.
+
+The scan poses, grasp heights, clustering distances, and plane thresholds are fixed choices. They worked in the tested scenes, but are not a universal solution for different object sizes, clutter, or every reachable part of the table.
+
+Returning home and using raised approach positions reduce some movement risks. There is no obstacle-aware path search or check of every intermediate arm configuration. Joint-limit checks alone do not prevent collisions.
+
+After the initial scene estimate, pick and place actions do not use fresh camera observations to confirm their results. A slipped or missed fruit can therefore remain unnoticed by the submitted program.
+
+The simulated sensor has idealised depth and known camera geometry. A real camera can have noise, missing depth, reflections, and calibration errors. Real robots can also have joint errors and different contact behaviour. Results in this simulator do not establish real-robot performance.
+
+### 8.4 Improvements to discuss if asked
+
+These are possible future ideas, not features that must be added now:
+
+| Limitation | Possible next step |
+|---|---|
+| Touching fruits merge | Use image detections to help split a combined 3D group. |
+| The same downward grasp orientation is used for every fruit | Estimate a useful grasp direction from the cloud. PCA, which finds the direction in which points are most spread out, is one possible tool. |
+| No obstacle-aware movement planner | Use a collision model and a path-search method such as RRT, which samples possible arm configurations and checks connections between them. |
+| Detector misses or mislabels objects | Improve the training data and evaluate whether fine-tuning actually helps. |
+| A grasp or placement can fail unnoticed | Look again after the action and decide whether to retry. Finger spacing can provide a clue, but a nonzero gap alone is not proof of a grasp. |
+
+Keep additions tied to an observed requirement or failure. This follows YAGNI: do not build extra machinery just because it might be useful later.
+
+## 9. Viva questions with answers you can practise aloud
+
+The answers here are deliberately shorter than the walkthrough. Use sections 4 to 7 when you need the calculation or code detail behind an answer.
+
+### 9.1 Explaining the project
+
+**What is the aim of the assignment?**
+
+We estimate objects from an arm-mounted colour and depth camera, then use those estimates to move the fruits to a plate. The robot knows its own state, while object positions come from observations.
+
+**What does eye-in-hand mean?**
+
+The camera is attached to the robot's hand. Moving the arm changes the camera's viewpoint and pose, so every image needs its own camera-to-base transform.
+
+**Why can we not use `getBasePositionAndOrientation` for objects?**
+
+It reveals exact simulator object poses. The assignment asks us to estimate those poses from the camera, as a robot would need to do when object locations are unknown.
+
+**Can the provided camera helper use `getCameraImage` internally?**
+
+Yes. Rendering the simulated sensor is the helper's job. Our assignment logic uses the helper's observations rather than directly requesting camera images or segmentation masks from PyBullet.
+
+**Why take several views?**
+
+A single image shows only visible surfaces. Other views can reveal surfaces hidden from the first one and give a more complete point cloud. Coverage still depends on the chosen poses.
+
+**Is the solution general or hard-coded?**
+
+Object targets come from the observed point clouds. The planner handles different subsets of the fruit classes. The scan pattern and processing thresholds are fixed heuristics, and there is only one stored object per class. We tested three scenes, not every possible arrangement.
+
+**What is the overall architecture?**
+
+Sense, plan, then act. We estimate the scene, build the action list, and execute it. At the task level, it is open-loop: the camera does not recheck each manipulation result. Joint movement itself uses feedback.
+
+### 9.2 Explaining perception
+
+**Why do we need both colour and depth?**
+
+The colour image helps identify what an object is. Depth supplies 3D surface positions. Combining them lets us attach an object name to points the arm can use for a target.
+
+**What are camera intrinsics and extrinsics?**
+
+Intrinsics describe how the camera maps 3D points to pixels. Extrinsics describe the camera's position and rotation relative to the robot base. We need both to connect an image location to a robot target.
+
+**What is `T_cb`, and why is it a 4 by 4 matrix?**
+
+It transforms camera coordinates into robot-base coordinates. The matrix combines rotation and translation. Using a fourth coordinate of one lets us apply both in a single multiplication.
+
+**Why is ICP needed if the camera pose is known?**
+
+The camera transform gives an initial alignment. ICP refines agreement between the sampled surfaces, and the assignment asks us to use it. In a real system, camera calibration or joint errors can also affect alignment.
+
+**What does ICP need to work well?**
+
+It needs useful overlap and a reasonable starting alignment. With too little overlap or repeated shapes, it can settle on the wrong alignment even when its reported error is small.
+
+**What is the difference between point-to-point and point-to-plane ICP?**
+
+Point-to-point reduces distances between matching points. Point-to-plane reduces distances along the target surface normals, meaning directions perpendicular to the surface. Point-to-plane can converge faster on suitable surfaces. We use point-to-point, which does not require estimating normals.
+
+**Where does SVD fit into point-to-point alignment?**
+
+SVD is a matrix calculation used to solve for a rotation that best aligns matched point sets. Open3D handles the alignment calculation; the assignment code calls its registration API.
+
+**Why downsample with a voxel grid?**
+
+Overlapping images produce many nearby or repeated samples. A 5 mm grid replaces points in small cubes with representative points, reducing the work in ICP, plane removal, and clustering.
+
+**How does RANSAC find a plane? Why not fit all points at once?**
+
+RANSAC tests planes from small random samples and looks for support from nearby points. A least-squares fit to every scene point can be pulled away from the tabletop by objects and other surfaces. RANSAC is more tolerant of those points, but still needs checks on the chosen plane.
+
+**What RANSAC settings did we use?**
+
+A 1 cm distance threshold, three sampled points, and up to 1,000 iterations. We remove a candidate only if it is large and nearly horizontal.
+
+**Why DBSCAN instead of K-means?**
+
+DBSCAN can find groups without a chosen cluster count and marks sparse points as noise. K-means requires the number of groups in advance and assigns points according to distances from cluster centres.
+
+**What if the DBSCAN radius is too large or too small?**
+
+Too large can join neighbouring fruits. Too small can split one fruit into pieces or leave too many points as noise. Our radius is 2 cm.
+
+**How do we connect a YOLO box to a 3D cluster?**
+
+We project the cluster's bounding-box centre into the image. We consider only boxes containing that pixel. If boxes overlap, we choose the closest box centre. No suitable box means no label.
+
+**Why convert RGB into BGR?**
+
+The sensor returns RGB. The detector's NumPy-image interface expects BGR. Swapping channels puts the colours in the expected order; leaving them swapped can affect recognition.
+
+**What happens if two clusters get the same label?**
+
+We keep the larger one. That helps with repeated plate labels on shelf pieces in this setup. It does not provide support for two real objects of the same class.
+
+**What does YOLO do internally, at a high level?**
+
+YOLOv8 is a one-stage detector: a convolutional neural network (CNN) predicts boxes and class scores in one pass through the image. The library filters overlapping duplicate detections using non-maximum suppression, or NMS. We use the supplied trained weights, not a model trained during the demo.
+
+**Why not just use the depth inside a detection box?**
+
+A rectangular image box can include table and background pixels as well as the object. A 3D cluster gives a separate group of surface points, though that cluster can also be incomplete or incorrectly grouped.
+
+### 9.3 Explaining movement and planning
+
+**What are forward and inverse kinematics?**
+
+Forward kinematics calculates a hand pose from joint angles. Inverse kinematics finds joint angles for a requested hand pose. Our movement function uses PyBullet's IK solver.
+
+**What are a Jacobian and damped least squares?**
+
+A Jacobian describes how small joint-angle changes affect hand motion. Damped least squares is an IK approach that reduces unstable large updates near difficult configurations. These explain the numerical IK idea; our Python code delegates the solving to PyBullet.
+
+**Why convert Euler angles to a quaternion?**
+
+We describe the target as roll, pitch, and yaw because those angles are convenient to read. The simulator's IK API expects a quaternion, so the code converts the rotation format before calling it.
+
+**Why use a crane grasp?**
+
+Approaching from above is a simple choice for these roughly rounded fruit models. It reduces the need to estimate each object's full orientation. It still needs enough space and a useful grasp height.
+
+**How is the grasp height chosen?**
+
+The code uses the highest observed point minus 3 cm. That puts the target below the visible top, where the fingers can surround the fruit. It is a tuned offset, not a guarantee for every fruit size.
+
+**How is the release position chosen?**
+
+We use the perceived plate centre in x and y and release 8 cm above its highest observed point. Small horizontal offsets spread the release positions around the plate.
+
+**What does `POSITION_CONTROL` mean?**
+
+The motor controller tries to bring a joint to a requested position. For rotating arm joints, the `force` value limits motor torque; for sliding finger joints, it limits force. `maxVelocity` limits joint speed.
+
+**How do the fingers move together?**
+
+The supplied `PandaArm` creates a gear constraint between finger joints 9 and 10, using `gearRatio=-1`. It coordinates their motion so the fingers open and close together.
+
+**What is link 11?**
+
+It is `panda_grasptarget`, a reference point between the fingertips. Using it as the IK target places that reference point at the requested grasp position.
+
+**Is the fruit attached to the robot?**
+
+No fruit-to-hand constraint is created. Contact and friction hold the fruit. The finger gear constraint coordinates the fingers; it does not attach the object.
+
+**Why return home between operations? Does that prevent collisions?**
+
+It gives us a simple transfer strategy and reduces some collision risk. We do not check the whole path, so we cannot claim that returning home prevents every collision.
+
+**What happens when the arm cannot reach its joint target?**
+
+After 10 seconds, the code requests a hold at the current joint angles and raises a timeout error. Later plan steps do not run. Targets outside the limits are rejected before movement starts.
+
+**What if the plate is not detected?**
+
+The planner returns an empty plan and prints a clear message. It does not use a guessed plate position.
+
+**Does finishing the plan prove the task succeeded?**
+
+No. It proves the planned actions finished without a movement error. The submitted program does not confirm a grasp or recheck placement. A separate test evaluated final fruit positions.
+
+### 9.4 Explaining the Python structure
+
+**How would you walk through `main.py`?**
+
+It sets up the scene and robot, generates views, captures point clouds, combines them, removes planes, forms clusters, labels them, builds a plan, and executes the actions. Section 3 shows the function names and outputs.
+
+**Which parts are supplied and which contain the assignment implementation?**
+
+The entry point, environment, robot constants, sensor helper, assets, initial scene, and weights are supplied. The implementation work is in `control.py`, `perception.py`, and `planning.py`. Describe each teammate's contribution from the actual work record.
+
+**Which helpers were added beyond the main assignment functions?**
+
+The original notes list `get_joint_positions`, `find_closest_box_label`, and the placement `offset` argument. They read joint angles, match boxes to clusters, and spread releases. Confirm the exact starter-code differences from the team's work history before discussing individual contributions.
+
+**Why inherit from `PandaArm`?**
+
+It provides the robot constants and setup, including joint indices, limits, home angles, finger values, and the finger constraint. `Manipulator` can use those without copying their definitions.
+
+**Why keep the plan as method names and argument lists?**
+
+The planner can build and print a sequence before anything moves. The controller then executes that sequence. This keeps choosing actions separate from sending motor commands.
+
+**How does `getattr` execute the plan?**
+
+`getattr(self, action)` looks up the method named by the action string. `function(*args)` passes the stored arguments to it. A name that does not exist raises an `AttributeError`.
+
+**Why does the planner have its own `Perception` object? Does it load YOLO twice?**
+
+The constructor follows the starter structure and uses that object for pose calculations. YOLO is loaded only when `identify_objects` needs it, so the planner's separate object does not load a second model.
+
+**Why separate `Perception` and `DepthProcessor`?**
+
+`Perception` deals with the camera, robot viewpoints, and object labels. `DepthProcessor` works on point clouds without moving the robot. This keeps those jobs easy to follow and allows point-cloud calculations to be checked separately.
+
+**What do `VISUALIZE` and `OUTPUT_FOLDER` do?**
+
+`VISUALIZE` enables point-cloud display windows. `OUTPUT_FOLDER` chooses where annotated detection images are saved. They help inspect the pipeline; they do not add grasp or placement verification.
+
+### 9.5 Explaining simulation and evaluation
+
+**How does simulation time advance?**
+
+The normal GUI setup enables real-time simulation, and the control code waits while the arm moves. The separate headless test harness explicitly calls `stepSimulation` and supplies a simulation clock. Those are different ways of running the same pipeline.
+
+**What camera are we simulating?**
+
+The supplied RGB-D helper uses a 640 by 480 image, a 70-degree field of view, and near/far values of 0.047 and 2 m. Its camera position has a small offset from the hand, and the hand's rotation determines its viewing direction.
+
+**Why can a real robot behave differently?**
+
+Real depth can be noisy or missing, camera calibration can be imperfect, joints can have errors, and objects can slip differently. The simulator is an idealised setting, so the tested simulation results do not guarantee real-world performance.
+
+**How was final placement checked without breaking the assignment rule?**
+
+The submitted pipeline used camera observations for object positions. A separate evaluation script read true fruit positions afterward to score the result. Those positions did not feed into perception, target generation, or planning.
+
+**What would you improve next?**
+
+Choose a change based on a measured failure. Possible examples are splitting touching objects, checking a grasp with a fresh observation, or adding collision-aware movement. Explain what evidence would justify the extra complexity.
+
+### 9.6 The tuning values in one place
+
+| Value | Location | Meaning |
+|---|---|---|
+| Seven base angles, two wrist tilts | `generate_exploration_poses` | 14 views in the current scan pattern. |
+| Wrist angles 1.49 and 1.85 rad | `generate_exploration_poses` | Two hand tilts for viewing the scene. |
+| Valid depth between 0 and 1.5 m | `rgbd_to_pointcloud` | Reject invalid readings and distant background. |
+| Voxel size 0.005 m | `DepthProcessor.__init__` | A 5 mm grid for reducing point count. |
+| ICP matching distance 0.02 m | `register_pointclouds` | Matches must be within 2 cm under the current alignment. |
+| Plane threshold 0.01 m; sample size 3; 1,000 iterations | `remove_plane` | RANSAC plane fitting. |
+| `abs(c) > 0.99`; more than 10,000 points | `remove_planes` | Accept only large, nearly horizontal planes. |
+| Up to three plane-removal attempts | `remove_planes` | A bounded loop, not automatic removal of every surface. |
+| Table height + 0.01 m | `remove_planes` | Keep points more than 1 cm above the estimated table. |
+| DBSCAN radius 0.02 m; 20 points | `cluster_objects` | Neighbourhood size and density requirement. |
+| At least 100 points per retained cluster | `cluster_objects` | Drop very small groups. |
+| At least 0.2 m horizontal distance from the base | `cluster_objects` | Reject groups close to the base. |
+| Cluster top + 0.30 m; x shift -0.04 m | `get_cluster_top_position` | Hand target for an observation above a cluster. |
+| Object top - 0.03 m | `get_object_pick_pose` | Estimated grasp height. |
+| Plate top + 0.08 m | `get_obj_place_pose` | Release height. |
+| Horizontal release shifts of 0.04 m | `get_clear_task_plan` | Spread fruits around the plate centre. |
+| Pick waypoints +0.20, +0.05, and +0.25 m | `pick_object_from` | Approach and lift relative to the grasp position. |
+| Place waypoints +0.15 m | `place_object_at` | Approach and retreat relative to the release position. |
+| Arm speed 0.8 rad/s; torque limit 200 | `move_joints` | Limits used in arm motor commands. |
+| Finger force limit 300; wait 1 second | `command_gripper` | Gripper command settings. |
+| Angle error below 0.01 rad; speed at most 0.01 rad/s | Joint movement checks | Conditions for considering a move settled. |
+| Wait at most 10 seconds | `move_joints` | Time limit before requesting a hold and stopping the task. |
+
+These values serve different purposes. Know what each one controls rather than memorising them as an unexplained list.
+
+## 10. What was tested and what the results mean
+
+### 10.1 Full pipeline tests on the Mac
+
+The full camera pipeline was tested on 28 October 2026 using the Mac environment listed in section 2. The runs used actual simulated camera observations, Open3D processing, the supplied YOLO weights, and the implemented planner and controller.
+
+| Scene | Fruits placed on the plate | Full pipeline result |
+|---|---|---|
+| Supplied default scene | 4 of 4 | Passed. |
+| Plate on the opposite side, with moved fruits | 4 of 4 | Passed. |
+| Default scene with the plum removed | 3 of 3 | Passed. |
+| Total | 11 of 11 | All three tested scenes passed. |
+
+The separate harness ran PyBullet in DIRECT mode, meaning without a GUI window, and advanced physics explicitly during movement waits. The normal `main.py` still starts the provided GUI environment.
+
+After execution, the evaluator read the true fruit positions. It checked whether each fruit centre was within the plate's horizontal area and a height range consistent with being on the plate. The horizontal test used a circle centred on the plate's bounding box, with radius equal to the smaller horizontal half-width. The height check allowed a centre between the plate's bottom and its top plus twice the fruit's current bounding-box height.
+
+That is a geometric placement check, not a proof of contact with the plate surface. It provides a repeatable test for these scenes. The true positions were not supplied to the operational perception or planning code.
+
+The harness also inspected contacts during movement. It found no unintended arm contacts deeper than 3 mm in these runs, excluding the fixed base and intended finger/fruit contact. This threshold-based check does not establish collision-free movement for all scenes or rule out every shallow contact.
+
+### 10.2 Other checks
+
+Twenty focused logic checks passed. They covered empty inputs, detection matching, projection, joint-target validation, successful movement completion, and stopping later actions after failure.
+
+Ten additional checks used the installed libraries. They covered empty merging, tiny clouds, noise-only clustering, invalid depth filtering, empty identification, a missing plate in the planner input, and no detections from a blank image.
+
+Those failure checks are smaller checks of specific behaviours. They are not ten additional full grasping scenes. In particular, the missing-plate check tested the planner with no plate label; it did not prove that the detector can never mistake background structure for a plate.
+
+The dependency check also passed, and the Python files remained compatible with Python 3.9 syntax. Syntax compatibility alone does not establish compatibility with every library build in the grading environment.
+
+### 10.3 What remains unverified
+
+The results above are for three Mac headless scenes. The Windows GUI instructions were not retested in this verification, and neither was the official Linux grading environment. The normal Mac GUI and Open3D display interactions were also not part of these automated checks.
+
+Do not turn 11 successful placements into a claim of a universal 100% success rate. More scenes, different object spacing, occlusion, and different platform builds can expose failures.
+
+## 11. Older lab-progress material
+
+The repository also has an `origin/lab-progress` branch. Earlier notes describe it as a half-finished lab-check version with an `A4_progress` folder: steps 1.1 to 1.5 work, while identification, planning, and picking/placing remain stubs. They refer to `A4_progress/run_progress.bat` and `A4_progress/PROGRESS.md` for that version.
+
+That material is separate from the current implementation. It was not rerun as part of the latest Mac tests. If you need to inspect it, first save your current work and check `git status`; do not switch branches casually in the middle of a demo. The current full-pipeline demonstration uses the working tree described in these notes.
+
+## 12. Keeping these notes useful
+
+When the code changes, update the matching function description, viva answer, tuning value, and any affected demo instructions. After testing, record the date, platform, scene, and the exact success check used.
+
+Keep observed results separate from assumptions and possible future improvements. Before describing an older development problem as something you personally encountered, confirm it against the team's actual work history.
+
+For further reading, use the [Open3D 0.19 point-cloud guide](https://www.open3d.org/docs/0.19.0/tutorial/geometry/pointcloud.html), [ICP tutorial](https://www.open3d.org/docs/0.19.0/tutorial/pipelines/icp_registration.html), and [visualization controls](https://www.open3d.org/docs/0.19.0/tutorial/visualization/visualization.html). The code in this repository and the course handout determine what this particular implementation does.
